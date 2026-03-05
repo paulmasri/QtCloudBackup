@@ -18,6 +18,14 @@ public:
     void deleteBackup(const QString &filename) override;
     void scanBackups() override;
     void triggerDownload(const QString &filename) override;
+
+private:
+    QString backupDir() const;
+
+    QString m_backupRoot;
+    QtCloudBackup::StorageStatus m_status = QtCloudBackup::StorageStatus::Unknown;
+    QString m_statusDetail;
+    QtCloudBackup::StorageType m_storageType = QtCloudBackup::StorageType::None;
 };
 
 #endif // QTCLOUDBACKUP_WINDOWSONEDRIVEBACKEND_H

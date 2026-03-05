@@ -9,12 +9,14 @@
 #include <QStandardPaths>
 #include <QtConcurrent>
 
-// Phase 1: always use LocalBackend. Platform backends will provide their own
-// createPlatformBackend() in Phases 2-3, guarded by #if at that point.
+// Platform backends provide their own createPlatformBackend().
+// The fallback is used only when no platform backend is compiled in.
+#if !defined(Q_OS_WIN) && !defined(Q_OS_APPLE)
 std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 {
     return std::make_unique<LocalBackend>();
 }
+#endif
 
 QString LocalBackend::backupDir() const
 {

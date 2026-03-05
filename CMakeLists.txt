@@ -26,8 +26,12 @@ set(SOURCES
     src/platform/fallback/localbackend.cpp
 )
 
-# Phase 1: only fallback backend. Platform backends will be added in Phases 2-3
-# with their implementation files (.mm / .cpp).
+if(WIN32)
+    list(APPEND SOURCES
+        src/platform/windows/windowsonedrivebackend.h
+        src/platform/windows/windowsonedrivebackend.cpp
+    )
+endif()
 
 qt_add_library(QtCloudBackup STATIC ${SOURCES})
 
