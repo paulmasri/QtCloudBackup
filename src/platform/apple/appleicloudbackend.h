@@ -1,0 +1,23 @@
+#ifndef QTCLOUDBACKUP_APPLEICLOUDBACKEND_H
+#define QTCLOUDBACKUP_APPLEICLOUDBACKEND_H
+
+#include "../../cloudbackupbackend.h"
+
+class AppleICloudBackend : public CloudBackupBackend {
+    Q_OBJECT
+public:
+    using CloudBackupBackend::CloudBackupBackend;
+
+    void initialise() override;
+    QtCloudBackup::StorageStatus storageStatus() const override;
+    QString statusDetail() const override;
+    QtCloudBackup::StorageType storageType() const override;
+
+    void writeBackup(const QString &filename, const QByteArray &data, const QJsonObject &meta) override;
+    void readBackup(const QString &filename) override;
+    void deleteBackup(const QString &filename) override;
+    void scanBackups() override;
+    void triggerDownload(const QString &filename) override;
+};
+
+#endif // QTCLOUDBACKUP_APPLEICLOUDBACKEND_H
