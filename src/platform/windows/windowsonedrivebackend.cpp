@@ -8,6 +8,7 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QtConcurrent>
@@ -406,34 +407,38 @@ void WindowsOneDriveBackend::scanOrphanedBackups()
             }
         }
 
-        // Scan candidates after the active one (lower priority)
+        // Scan candidates after the active one (lower priority), deduplicating paths
+        QSet<QString> seenPaths;
+        if (activeIdx >= 0)
+            seenPaths.insert(QDir(activeRoot).canonicalPath());
+
+        // Build list of full scan directories (with QTCLOUDBACKUP_WINDOWS_BACKUP_PATH applied)
+        const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
         QList<QPair<QString, QtCloudBackup::StorageType>> dirsToScan;
         if (activeIdx >= 0) {
-            for (int i = activeIdx + 1; i < candidates.size(); ++i)
-                dirsToScan.append({candidates[i].path, candidates[i].type});
-        }
-
-        // Always include local fallback
-        QString fallback = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-                           + QStringLiteral("/Backups");
-        bool fallbackAlreadyIncluded = false;
-        for (const auto &d : dirsToScan) {
-            if (d.first == fallback) {
-                fallbackAlreadyIncluded = true;
-                break;
+            for (int i = activeIdx + 1; i < candidates.size(); ++i) {
+                QString canonical = QDir(candidates[i].path).canonicalPath();
+                if (canonical.isEmpty() || seenPaths.contains(canonical))
+                    continue;
+                seenPaths.insert(canonical);
+                QString scanDir = relPath.isEmpty() ? candidates[i].path
+                                                    : candidates[i].path + QLatin1Char('/') + relPath;
+                dirsToScan.append({scanDir, candidates[i].type});
             }
         }
-        if (!fallbackAlreadyIncluded)
+
+        // Always include local fallback (already a complete path — no relPath appended)
+        QString fallback = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+                           + QStringLiteral("/Backups");
+        QString fallbackCanonical = QDir(fallback).canonicalPath();
+        if (!fallbackCanonical.isEmpty() && !seenPaths.contains(fallbackCanonical))
             dirsToScan.append({fallback, QtCloudBackup::StorageType::LocalDirectory});
 
         static const QRegularExpression re(
             QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
         QList<OrphanedBackupInfo> orphans;
-        for (const auto &[dirPath, storType] : dirsToScan) {
-            const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
-            QString scanDir = relPath.isEmpty() ? dirPath : dirPath + QLatin1Char('/') + relPath;
-
+        for (const auto &[scanDir, storType] : dirsToScan) {
             QDir d(scanDir);
             if (!d.exists())
                 continue;
