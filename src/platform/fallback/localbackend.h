@@ -18,6 +18,8 @@ public:
     void deleteBackup(const QString &filename) override;
     void scanBackups() override;
     void triggerDownload(const QString &filename) override;
+    void scanOrphanedBackups() override;
+    void migrateOrphanedBackups(const QList<OrphanedBackupInfo> &orphans) override;
 
 private:
     QString backupDir() const;

@@ -9,6 +9,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QtConcurrent>
 
 #include <qt_windows.h>
@@ -86,6 +87,12 @@ QString WindowsOneDriveBackend::backupDir() const
     if (relPath.isEmpty())
         return m_backupRoot;
     return m_backupRoot + QLatin1Char('/') + relPath;
+}
+
+QString WindowsOneDriveBackend::localFallbackDir() const
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+           + QStringLiteral("/Backups");
 }
 
 void WindowsOneDriveBackend::initialise()
@@ -376,6 +383,157 @@ void WindowsOneDriveBackend::triggerDownload(const QString &filename)
             if (!self) return;
             emit self->downloadCompleted(filename, ok,
                                    ok ? QString() : WindowsOneDriveBackend::tr("Failed to download backup file"));
+        }, Qt::QueuedConnection);
+    });
+}
+
+// --- Orphaned backup detection and migration ---
+
+void WindowsOneDriveBackend::scanOrphanedBackups()
+{
+    QString activeRoot = m_backupRoot;
+    auto activeType = m_storageType;
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, activeRoot, activeType] {
+        auto candidates = detectOneDriveCandidates();
+
+        // Find index of active candidate
+        int activeIdx = -1;
+        for (int i = 0; i < candidates.size(); ++i) {
+            if (candidates[i].path == activeRoot) {
+                activeIdx = i;
+                break;
+            }
+        }
+
+        // Scan candidates after the active one (lower priority)
+        QList<QPair<QString, QtCloudBackup::StorageType>> dirsToScan;
+        if (activeIdx >= 0) {
+            for (int i = activeIdx + 1; i < candidates.size(); ++i)
+                dirsToScan.append({candidates[i].path, candidates[i].type});
+        }
+
+        // Always include local fallback
+        QString fallback = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+                           + QStringLiteral("/Backups");
+        bool fallbackAlreadyIncluded = false;
+        for (const auto &d : dirsToScan) {
+            if (d.first == fallback) {
+                fallbackAlreadyIncluded = true;
+                break;
+            }
+        }
+        if (!fallbackAlreadyIncluded)
+            dirsToScan.append({fallback, QtCloudBackup::StorageType::LocalDirectory});
+
+        static const QRegularExpression re(
+            QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+
+        QList<OrphanedBackupInfo> orphans;
+        for (const auto &[dirPath, storType] : dirsToScan) {
+            const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
+            QString scanDir = relPath.isEmpty() ? dirPath : dirPath + QLatin1Char('/') + relPath;
+
+            QDir d(scanDir);
+            if (!d.exists())
+                continue;
+
+            QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
+                                              QDir::Files, QDir::Name);
+            for (const QString &entry : entries) {
+                OrphanedBackupInfo info;
+                info.filename = entry;
+                info.originStorageType = storType;
+                info.originPath = scanDir;
+
+                QString metaPath = scanDir + QLatin1Char('/') + entry.chopped(4)
+                                   + QStringLiteral(".meta");
+                QFile metaFile(metaPath);
+                if (metaFile.open(QIODevice::ReadOnly)) {
+                    QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
+                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
+                    info.timestamp = QDateTime::fromString(
+                        meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
+                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                }
+
+                if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
+                    auto match = re.match(entry);
+                    if (match.hasMatch()) {
+                        info.sourceId = match.captured(1);
+                        info.timestamp = QDateTime::fromString(
+                            match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
+                        info.timestamp.setTimeZone(QTimeZone::utc());
+                    }
+                }
+
+                orphans.append(info);
+            }
+        }
+
+        QMetaObject::invokeMethod(qApp, [self, orphans] {
+            if (!self) return;
+            emit self->orphanScanCompleted(orphans);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void WindowsOneDriveBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> &orphans)
+{
+    QString destDir = backupDir();
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, destDir, orphans] {
+        int total = orphans.size();
+        int migrated = 0;
+        bool allSucceeded = true;
+
+        for (int i = 0; i < total; ++i) {
+            const auto &orphan = orphans[i];
+            QString srcBak = orphan.originPath + QLatin1Char('/') + orphan.filename;
+            QString srcMeta = orphan.originPath + QLatin1Char('/')
+                              + orphan.filename.chopped(4) + QStringLiteral(".meta");
+            QString destBak = destDir + QLatin1Char('/') + orphan.filename;
+            QString destMeta = destDir + QLatin1Char('/')
+                               + orphan.filename.chopped(4) + QStringLiteral(".meta");
+
+            // Skip duplicates
+            if (QFile::exists(destBak)) {
+                ++migrated;
+                QMetaObject::invokeMethod(qApp, [self, migrated, total] {
+                    if (!self) return;
+                    emit self->migrationProgress(migrated, total);
+                }, Qt::QueuedConnection);
+                continue;
+            }
+
+            // Copy .bak
+            if (!QFile::copy(srcBak, destBak)) {
+                allSucceeded = false;
+                continue;
+            }
+
+            // Copy .meta (best effort)
+            if (QFile::exists(srcMeta))
+                QFile::copy(srcMeta, destMeta);
+
+            // Delete originals
+            QFile::remove(srcBak);
+            QFile::remove(srcMeta);
+
+            ++migrated;
+            QMetaObject::invokeMethod(qApp, [self, migrated, total] {
+                if (!self) return;
+                emit self->migrationProgress(migrated, total);
+            }, Qt::QueuedConnection);
+        }
+
+        bool success = allSucceeded;
+        int count = migrated;
+        QString reason = allSucceeded ? QString()
+            : WindowsOneDriveBackend::tr("Some files could not be migrated");
+        QMetaObject::invokeMethod(qApp, [self, success, count, reason] {
+            if (!self) return;
+            emit self->migrationCompleted(success, count, reason);
         }, Qt::QueuedConnection);
     });
 }

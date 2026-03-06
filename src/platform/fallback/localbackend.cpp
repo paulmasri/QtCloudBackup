@@ -233,3 +233,15 @@ void LocalBackend::triggerDownload(const QString &filename)
         emit downloadCompleted(filename, true, QString());
     }, Qt::QueuedConnection);
 }
+
+void LocalBackend::scanOrphanedBackups()
+{
+    // Nothing below local — no orphans possible
+    emit orphanScanCompleted({});
+}
+
+void LocalBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> &)
+{
+    // Nothing to migrate
+    emit migrationCompleted(true, 0, {});
+}

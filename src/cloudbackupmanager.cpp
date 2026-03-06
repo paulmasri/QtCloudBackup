@@ -88,6 +88,33 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     connect(m_backend.get(), &CloudBackupBackend::remoteChangeDetected, this,
             &CloudBackupManager::remoteBackupDetected);
 
+    connect(m_backend.get(), &CloudBackupBackend::orphanScanCompleted, this,
+            [this](const QList<OrphanedBackupInfo> &orphans) {
+                m_orphanedBackups = orphans;
+                emit hasOrphanedBackupsChanged();
+                QVariantList list;
+                list.reserve(orphans.size());
+                for (const auto &o : orphans)
+                    list.append(QVariant::fromValue(o));
+                emit orphanedBackupsDetected(list);
+            });
+
+    connect(m_backend.get(), &CloudBackupBackend::migrationProgress, this,
+            [this](int completed, int total) {
+                emit migrationUpdated(QtCloudBackup::MigrationStatus::MigrationInProgress,
+                                      completed, total, {});
+            });
+
+    connect(m_backend.get(), &CloudBackupBackend::migrationCompleted, this,
+            [this](bool success, int migratedCount, const QString &reason) {
+                auto status = success ? QtCloudBackup::MigrationStatus::MigrationSucceeded
+                                      : QtCloudBackup::MigrationStatus::MigrationFailed;
+                int total = m_orphanedBackups.size();
+                m_orphanedBackups.clear();
+                emit hasOrphanedBackupsChanged();
+                emit migrationUpdated(status, migratedCount, total, reason);
+            });
+
     m_backend->initialise();
 }
 
@@ -200,6 +227,25 @@ void CloudBackupManager::deleteBackup(const QString &filename)
 void CloudBackupManager::refresh()
 {
     m_backend->initialise();
+}
+
+bool CloudBackupManager::hasOrphanedBackups() const
+{
+    return !m_orphanedBackups.isEmpty();
+}
+
+void CloudBackupManager::checkForOrphanedBackups()
+{
+    m_backend->scanOrphanedBackups();
+}
+
+void CloudBackupManager::migrateOrphanedBackups()
+{
+    if (m_orphanedBackups.isEmpty())
+        return;
+    emit migrationUpdated(QtCloudBackup::MigrationStatus::MigrationInProgress,
+                          0, m_orphanedBackups.size(), {});
+    m_backend->migrateOrphanedBackups(m_orphanedBackups);
 }
 
 void CloudBackupManager::handleReadFailed(const QString &filename, const QString &reason)

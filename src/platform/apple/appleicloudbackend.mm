@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QtConcurrent>
 
 #import <Foundation/Foundation.h>
@@ -125,6 +126,12 @@ QtCloudBackup::StorageType AppleICloudBackend::storageType() const
 QString AppleICloudBackend::backupDir() const
 {
     return m_containerUrl.toLocalFile();
+}
+
+QString AppleICloudBackend::localFallbackDir() const
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+           + QStringLiteral("/Backups");
 }
 
 // --- NSMetadataQuery for file discovery and remote change detection ---
@@ -678,6 +685,169 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
                     emit self->downloadCompleted(filename, false, reason);
                 }, Qt::QueuedConnection);
             }
+        }
+    });
+}
+
+// --- Orphaned backup detection and migration ---
+
+void AppleICloudBackend::scanOrphanedBackups()
+{
+    QString fallbackDir = localFallbackDir();
+    QPointer<AppleICloudBackend> self(this);
+    (void)QtConcurrent::run([self, fallbackDir] {
+        @autoreleasepool {
+            QList<OrphanedBackupInfo> orphans;
+
+            QDir d(fallbackDir);
+            if (!d.exists()) {
+                QMetaObject::invokeMethod(qApp, [self, orphans] {
+                    if (!self) return;
+                    emit self->orphanScanCompleted(orphans);
+                }, Qt::QueuedConnection);
+                return;
+            }
+
+            QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
+                                              QDir::Files, QDir::Name);
+
+            static const QRegularExpression re(
+                QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+
+            for (const QString &entry : entries) {
+                OrphanedBackupInfo info;
+                info.filename = entry;
+                info.originStorageType = QtCloudBackup::StorageType::LocalDirectory;
+                info.originPath = fallbackDir;
+
+                // Try to read .meta sidecar
+                QString metaPath = fallbackDir + QLatin1Char('/') + entry.chopped(4)
+                                   + QStringLiteral(".meta");
+                QFile metaFile(metaPath);
+                if (metaFile.open(QIODevice::ReadOnly)) {
+                    QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
+                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
+                    info.timestamp = QDateTime::fromString(
+                        meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
+                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                }
+
+                // Fallback: parse filename
+                if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
+                    auto match = re.match(entry);
+                    if (match.hasMatch()) {
+                        info.sourceId = match.captured(1);
+                        info.timestamp = QDateTime::fromString(
+                            match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
+                        info.timestamp.setTimeZone(QTimeZone::utc());
+                    }
+                }
+
+                orphans.append(info);
+            }
+
+            QMetaObject::invokeMethod(qApp, [self, orphans] {
+                if (!self) return;
+                emit self->orphanScanCompleted(orphans);
+            }, Qt::QueuedConnection);
+        }
+    });
+}
+
+void AppleICloudBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> &orphans)
+{
+    QString destDir = backupDir();
+    QPointer<AppleICloudBackend> self(this);
+    (void)QtConcurrent::run([self, destDir, orphans] {
+        @autoreleasepool {
+            int total = orphans.size();
+            int migrated = 0;
+            bool allSucceeded = true;
+
+            auto coordinatedWrite = [](const QString &path, const QByteArray &data) -> bool {
+                NSURL *url = [NSURL fileURLWithPath:path.toNSString()];
+                NSFileCoordinator *coordinator =
+                    [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+                __block bool ok = true;
+
+                NSError *coordError = nil;
+                [coordinator coordinateWritingItemAtURL:url
+                                               options:NSFileCoordinatorWritingForReplacing
+                                                 error:&coordError
+                                            byAccessor:^(NSURL *newURL) {
+                    NSData *nsData = [NSData dataWithBytes:data.constData()
+                                                    length:static_cast<NSUInteger>(data.size())];
+                    NSError *err = nil;
+                    if (![nsData writeToURL:newURL options:NSDataWritingAtomic error:&err])
+                        ok = false;
+                }];
+
+                if (coordError)
+                    ok = false;
+                return ok;
+            };
+
+            for (int i = 0; i < total; ++i) {
+                const auto &orphan = orphans[i];
+                QString srcBak = orphan.originPath + QLatin1Char('/') + orphan.filename;
+                QString srcMeta = orphan.originPath + QLatin1Char('/')
+                                  + orphan.filename.chopped(4) + QStringLiteral(".meta");
+                QString destBak = destDir + QLatin1Char('/') + orphan.filename;
+                QString destMeta = destDir + QLatin1Char('/')
+                                   + orphan.filename.chopped(4) + QStringLiteral(".meta");
+
+                // Skip duplicates
+                if (QFile::exists(destBak)) {
+                    ++migrated;
+                    QMetaObject::invokeMethod(qApp, [self, migrated, total] {
+                        if (!self) return;
+                        emit self->migrationProgress(migrated, total);
+                    }, Qt::QueuedConnection);
+                    continue;
+                }
+
+                // Read source .bak
+                QFile bakFile(srcBak);
+                if (!bakFile.open(QIODevice::ReadOnly)) {
+                    allSucceeded = false;
+                    continue;
+                }
+                QByteArray bakData = bakFile.readAll();
+                bakFile.close();
+
+                // Coordinated write .bak to iCloud
+                if (!coordinatedWrite(destBak, bakData)) {
+                    allSucceeded = false;
+                    continue;
+                }
+
+                // Read and write .meta (best effort)
+                QFile metaFile(srcMeta);
+                if (metaFile.open(QIODevice::ReadOnly)) {
+                    QByteArray metaData = metaFile.read(MaxMetaFileSize);
+                    metaFile.close();
+                    coordinatedWrite(destMeta, metaData);
+                }
+
+                // Delete originals
+                QFile::remove(srcBak);
+                QFile::remove(srcMeta);
+
+                ++migrated;
+                QMetaObject::invokeMethod(qApp, [self, migrated, total] {
+                    if (!self) return;
+                    emit self->migrationProgress(migrated, total);
+                }, Qt::QueuedConnection);
+            }
+
+            bool success = allSucceeded;
+            int count = migrated;
+            QString reason = allSucceeded ? QString()
+                : AppleICloudBackend::tr("Some files could not be migrated");
+            QMetaObject::invokeMethod(qApp, [self, success, count, reason] {
+                if (!self) return;
+                emit self->migrationCompleted(success, count, reason);
+            }, Qt::QueuedConnection);
         }
     });
 }

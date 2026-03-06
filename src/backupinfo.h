@@ -52,7 +52,34 @@ enum class DownloadStatus {
 };
 Q_ENUM_NS(DownloadStatus)
 
+enum class MigrationStatus {
+    MigrationInProgress,
+    MigrationSucceeded,
+    MigrationFailed
+};
+Q_ENUM_NS(MigrationStatus)
+
 } // namespace QtCloudBackup
+
+class OrphanedBackupInfo {
+    Q_GADGET
+    Q_PROPERTY(QString sourceId MEMBER sourceId)
+    Q_PROPERTY(QDateTime timestamp MEMBER timestamp)
+    Q_PROPERTY(QVariantMap metadata MEMBER metadata)
+    Q_PROPERTY(QString filename MEMBER filename)
+    Q_PROPERTY(QtCloudBackup::StorageType originStorageType MEMBER originStorageType)
+    Q_PROPERTY(QString originPath MEMBER originPath)
+
+public:
+    QString sourceId;
+    QDateTime timestamp;
+    QVariantMap metadata;
+    QString filename;
+    QtCloudBackup::StorageType originStorageType = QtCloudBackup::StorageType::None;
+    QString originPath;
+};
+
+Q_DECLARE_METATYPE(OrphanedBackupInfo)
 
 class BackupInfo {
     Q_GADGET

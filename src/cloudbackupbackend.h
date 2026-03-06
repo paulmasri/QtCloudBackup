@@ -23,6 +23,8 @@ public:
     virtual void deleteBackup(const QString &filename) = 0;
     virtual void scanBackups() = 0;
     virtual void triggerDownload(const QString &filename) = 0;
+    virtual void scanOrphanedBackups() = 0;
+    virtual void migrateOrphanedBackups(const QList<OrphanedBackupInfo> &orphans) = 0;
 
 signals:
     void statusChanged(QtCloudBackup::StorageStatus status, const QString &detail);
@@ -35,6 +37,9 @@ signals:
     void downloadProgress(const QString &filename, qint64 received, qint64 total);
     void downloadCompleted(const QString &filename, bool success, const QString &reason);
     void remoteChangeDetected(const QString &sourceId);
+    void orphanScanCompleted(const QList<OrphanedBackupInfo> &orphans);
+    void migrationProgress(int completed, int total);
+    void migrationCompleted(bool success, int migratedCount, const QString &reason);
 };
 
 #endif // QTCLOUDBACKUP_CLOUDBACKUPBACKEND_H

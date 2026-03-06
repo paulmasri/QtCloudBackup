@@ -19,6 +19,7 @@ class CloudBackupManager : public QObject {
     Q_PROPERTY(QtCloudBackup::StorageType storageType READ storageType NOTIFY storageTypeChanged)
     Q_PROPERTY(bool backupInProgress READ backupInProgress NOTIFY backupInProgressChanged)
     Q_PROPERTY(int maxBackupsPerSource READ maxBackupsPerSource WRITE setMaxBackupsPerSource NOTIFY maxBackupsPerSourceChanged)
+    Q_PROPERTY(bool hasOrphanedBackups READ hasOrphanedBackups NOTIFY hasOrphanedBackupsChanged)
 
 public:
     explicit CloudBackupManager(QObject *parent = nullptr);
@@ -30,6 +31,7 @@ public:
     bool backupInProgress() const;
     int maxBackupsPerSource() const;
     void setMaxBackupsPerSource(int n);
+    bool hasOrphanedBackups() const;
 
     Q_INVOKABLE void createBackup(const QString &sourceId, const QByteArray &data, const QVariantMap &metadata = {});
     Q_INVOKABLE void listBackups();
@@ -37,6 +39,8 @@ public:
     Q_INVOKABLE void restoreBackup(const QString &filename);
     Q_INVOKABLE void deleteBackup(const QString &filename);
     Q_INVOKABLE void refresh();
+    Q_INVOKABLE void checkForOrphanedBackups();
+    Q_INVOKABLE void migrateOrphanedBackups();
 
 signals:
     void storageStatusChanged();
@@ -44,6 +48,7 @@ signals:
     void storageTypeChanged();
     void backupInProgressChanged();
     void maxBackupsPerSourceChanged();
+    void hasOrphanedBackupsChanged();
 
     void statusChanged(QtCloudBackup::StorageStatus status, const QString &detail);
     void backupSucceeded(const QString &filename, const QDateTime &timestamp);
@@ -59,6 +64,9 @@ signals:
     void deleteSucceeded(const QString &filename);
     void deleteFailed(const QString &filename, const QString &reason);
     void remoteBackupDetected(const QString &sourceId);
+    void orphanedBackupsDetected(const QVariantList &orphans);
+    void migrationUpdated(QtCloudBackup::MigrationStatus status, int migratedCount,
+                          int totalCount, const QString &reason);
 
 private:
     void pruneBackups(const QString &sourceId);
@@ -71,6 +79,7 @@ private:
     QString m_currentBackupSourceId;
     QDateTime m_currentBackupTimestamp;
     QString m_pendingRestoreFilename; // set when auto-downloading for restore
+    QList<OrphanedBackupInfo> m_orphanedBackups;
 };
 
 #endif // QTCLOUDBACKUP_CLOUDBACKUPMANAGER_H
