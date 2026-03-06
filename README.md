@@ -97,13 +97,11 @@ endif()
 
 ### Apple Developer portal (one-time)
 
-1. Go to Certificates, Identifiers & Profiles
-2. Edit (or create) the App ID for your app
-3. Enable the **iCloud** capability
-4. Under iCloud, enable **iCloud Documents** (not CloudKit)
-5. Create an iCloud Container with identifier `iCloud.com.yourcompany.YourApp`
-6. Assign this container to the App ID
-7. Regenerate the provisioning profile
+1. Go to Certificates, Identifiers & Profiles.
+2. Under **Identifiers**, create an **iCloud Container** with identifier `iCloud.com.yourcompany.YourApp`.
+3. Under **Identifiers**, edit (or create) the **App ID** for your app.
+4. Enable the **iCloud** capability (CloudKit support is auto-selected — this is fine) and click **Configure** to assign your iCloud Container.
+5. Regenerate the provisioning profile.
 
 Do **not** add `NSUbiquitousContainers` to your Info.plist — omitting it keeps the iCloud container hidden from the Files app.
 
@@ -272,6 +270,7 @@ After each successful `createBackup()`, the manager scans for all backups matchi
 - **Windows download progress** is indeterminate (`bytesTotal == -1`) because OneDrive hydration provides no granular progress API
 - **macOS auto-downloads** iCloud files eagerly, so explicit download testing requires iOS
 - **Unsigned macOS builds** cannot access iCloud — code signing is required even for development
+- **OneDrive folder is user-visible** — backup files are stored in a regular OneDrive sync folder, so the user can view, delete, or corrupt them
 
 ## Licence
 
