@@ -3,8 +3,18 @@
 
 #include "../../cloudbackupbackend.h"
 
+#include <QMutex>
 #include <QPointer>
 #include <QUrl>
+#include <memory>
+
+// Thread-safe guard for the NSMetadataQuery pointer.
+// Shared via std::shared_ptr so worker threads can safely access
+// the query even if the backend object is destroyed mid-flight.
+struct AppleQueryGuard {
+    QMutex mutex;
+    void *query = nullptr; // NSMetadataQuery*
+};
 
 class AppleICloudBackend : public CloudBackupBackend {
     Q_OBJECT
@@ -32,7 +42,7 @@ private:
     QUrl m_containerUrl;
     QtCloudBackup::StorageStatus m_status = QtCloudBackup::StorageStatus::Unknown;
     QString m_statusDetail;
-    void *m_metadataQuery = nullptr; // NSMetadataQuery*
+    std::shared_ptr<AppleQueryGuard> m_queryGuard = std::make_shared<AppleQueryGuard>();
     void *m_notificationObserver = nullptr; // id for NSUbiquityIdentityDidChangeNotification
 };
 

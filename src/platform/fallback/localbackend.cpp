@@ -1,9 +1,11 @@
 #include "localbackend.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
@@ -18,6 +20,8 @@ std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 }
 #endif
 
+static constexpr qint64 MaxMetaFileSize = 1024 * 1024; // 1 MB
+
 QString LocalBackend::backupDir() const
 {
     return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
@@ -26,19 +30,22 @@ QString LocalBackend::backupDir() const
 
 void LocalBackend::initialise()
 {
-    (void)QtConcurrent::run([this] {
-        QDir dir(backupDir());
-        bool ok = dir.exists() || dir.mkpath(QStringLiteral("."));
+    QString dir = backupDir();
+    QPointer<LocalBackend> self(this);
+    (void)QtConcurrent::run([self, dir] {
+        QDir d(dir);
+        bool ok = d.exists() || d.mkpath(QStringLiteral("."));
 
         auto status = ok ? QtCloudBackup::StorageStatus::LocalFallback
                          : QtCloudBackup::StorageStatus::Unavailable;
-        auto detail = ok ? tr("Using local storage")
-                         : tr("Failed to create backup directory");
+        auto detail = ok ? LocalBackend::tr("Using local storage")
+                         : LocalBackend::tr("Failed to create backup directory");
 
-        QMetaObject::invokeMethod(this, [this, status, detail] {
-            m_status = status;
-            m_statusDetail = detail;
-            emit statusChanged(status, detail);
+        QMetaObject::invokeMethod(qApp, [self, status, detail] {
+            if (!self) return;
+            self->m_status = status;
+            self->m_statusDetail = detail;
+            emit self->statusChanged(status, detail);
         }, Qt::QueuedConnection);
     });
 }
@@ -62,24 +69,28 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
                                 const QJsonObject &meta)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename, data, meta] {
+    QPointer<LocalBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename, data, meta] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath;
-        metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
         // Write .bak file atomically
         {
             QSaveFile file(bakPath);
             if (!file.open(QIODevice::WriteOnly)) {
-                QMetaObject::invokeMethod(this, [this, reason = tr("Failed to open backup file for writing")] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self,
+                        reason = LocalBackend::tr("Failed to open backup file for writing")] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
             file.write(data);
             if (!file.commit()) {
-                QMetaObject::invokeMethod(this, [this, reason = tr("Failed to write backup file")] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self,
+                        reason = LocalBackend::tr("Failed to write backup file")] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -89,22 +100,27 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
         {
             QSaveFile file(metaPath);
             if (!file.open(QIODevice::WriteOnly)) {
-                QMetaObject::invokeMethod(this, [this, reason = tr("Failed to open metadata file for writing")] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self,
+                        reason = LocalBackend::tr("Failed to open metadata file for writing")] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
             file.write(QJsonDocument(meta).toJson(QJsonDocument::Compact));
             if (!file.commit()) {
-                QMetaObject::invokeMethod(this, [this, reason = tr("Failed to write metadata file")] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self,
+                        reason = LocalBackend::tr("Failed to write metadata file")] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
         }
 
-        QMetaObject::invokeMethod(this, [this, filename] {
-            emit writeSucceeded(filename);
+        QMetaObject::invokeMethod(qApp, [self, filename] {
+            if (!self) return;
+            emit self->writeSucceeded(filename);
         }, Qt::QueuedConnection);
     });
 }
@@ -112,15 +128,17 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
 void LocalBackend::readBackup(const QString &filename)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename] {
+    QPointer<LocalBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath;
-        metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
         QFile bakFile(bakPath);
         if (!bakFile.open(QIODevice::ReadOnly)) {
-            QMetaObject::invokeMethod(this, [this, filename, reason = tr("Failed to open backup file for reading")] {
-                emit readFailed(filename, reason);
+            QMetaObject::invokeMethod(qApp, [self, filename,
+                    reason = LocalBackend::tr("Failed to open backup file for reading")] {
+                if (!self) return;
+                emit self->readFailed(filename, reason);
             }, Qt::QueuedConnection);
             return;
         }
@@ -129,11 +147,12 @@ void LocalBackend::readBackup(const QString &filename)
         QJsonObject meta;
         QFile metaFile(metaPath);
         if (metaFile.open(QIODevice::ReadOnly)) {
-            meta = QJsonDocument::fromJson(metaFile.readAll()).object();
+            meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
         }
 
-        QMetaObject::invokeMethod(this, [this, filename, data, meta] {
-            emit readSucceeded(filename, data, meta);
+        QMetaObject::invokeMethod(qApp, [self, filename, data, meta] {
+            if (!self) return;
+            emit self->readSucceeded(filename, data, meta);
         }, Qt::QueuedConnection);
     });
 }
@@ -141,17 +160,18 @@ void LocalBackend::readBackup(const QString &filename)
 void LocalBackend::deleteBackup(const QString &filename)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename] {
+    QPointer<LocalBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath;
-        metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
         bool ok = QFile::remove(bakPath);
         QFile::remove(metaPath); // Best effort
 
-        QMetaObject::invokeMethod(this, [this, filename, ok] {
-            emit deleteCompleted(filename, ok,
-                                 ok ? QString() : tr("Failed to delete backup file"));
+        QMetaObject::invokeMethod(qApp, [self, filename, ok] {
+            if (!self) return;
+            emit self->deleteCompleted(filename, ok,
+                                 ok ? QString() : LocalBackend::tr("Failed to delete backup file"));
         }, Qt::QueuedConnection);
     });
 }
@@ -159,7 +179,8 @@ void LocalBackend::deleteBackup(const QString &filename)
 void LocalBackend::scanBackups()
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir] {
+    QPointer<LocalBackend> self(this);
+    (void)QtConcurrent::run([self, dir] {
         QDir d(dir);
         QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
                                           QDir::Files, QDir::Name);
@@ -173,12 +194,11 @@ void LocalBackend::scanBackups()
             info.filename = entry;
             info.downloadState = QtCloudBackup::DownloadState::Local;
 
-            // Try to read .meta sidecar
-            QString metaPath = dir + QLatin1Char('/') + entry;
-            metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+            // Try to read .meta sidecar (bounded)
+            QString metaPath = dir + QLatin1Char('/') + entry.chopped(4) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
-                QJsonObject meta = QJsonDocument::fromJson(metaFile.readAll()).object();
+                QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
                 info.sourceId = meta[QStringLiteral("sourceId")].toString();
                 info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
                                                         Qt::ISODateWithMs);
@@ -199,8 +219,9 @@ void LocalBackend::scanBackups()
             backups.append(info);
         }
 
-        QMetaObject::invokeMethod(this, [this, backups] {
-            emit scanCompleted(backups);
+        QMetaObject::invokeMethod(qApp, [self, backups] {
+            if (!self) return;
+            emit self->scanCompleted(backups);
         }, Qt::QueuedConnection);
     });
 }

@@ -1,9 +1,11 @@
 #include "windowsonedrivebackend.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
@@ -15,6 +17,8 @@
 #ifndef QTCLOUDBACKUP_WINDOWS_BACKUP_PATH
 #define QTCLOUDBACKUP_WINDOWS_BACKUP_PATH ""
 #endif
+
+static constexpr qint64 MaxMetaFileSize = 1024 * 1024; // 1 MB
 
 struct OneDriveCandidate {
     QString path;
@@ -86,7 +90,8 @@ QString WindowsOneDriveBackend::backupDir() const
 
 void WindowsOneDriveBackend::initialise()
 {
-    (void)QtConcurrent::run([this] {
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self] {
         auto candidates = detectOneDriveCandidates();
 
         QString chosenRoot;
@@ -101,11 +106,12 @@ void WindowsOneDriveBackend::initialise()
         }
 
         if (chosenRoot.isEmpty()) {
-            QMetaObject::invokeMethod(this, [this] {
-                m_status = QtCloudBackup::StorageStatus::Unavailable;
-                m_statusDetail = tr("No OneDrive or Documents folder found");
-                m_storageType = QtCloudBackup::StorageType::None;
-                emit statusChanged(m_status, m_statusDetail);
+            QMetaObject::invokeMethod(qApp, [self] {
+                if (!self) return;
+                self->m_status = QtCloudBackup::StorageStatus::Unavailable;
+                self->m_statusDetail = WindowsOneDriveBackend::tr("No OneDrive or Documents folder found");
+                self->m_storageType = QtCloudBackup::StorageType::None;
+                emit self->statusChanged(self->m_status, self->m_statusDetail);
             }, Qt::QueuedConnection);
             return;
         }
@@ -120,24 +126,24 @@ void WindowsOneDriveBackend::initialise()
         QString detail;
 
         if (!ok) {
-            detail = tr("Failed to create backup directory");
+            detail = WindowsOneDriveBackend::tr("Failed to create backup directory");
         } else {
             switch (chosenType) {
             case QtCloudBackup::StorageType::OneDriveCommercial:
                 status = QtCloudBackup::StorageStatus::Ready;
-                detail = tr("Using OneDrive for Business");
+                detail = WindowsOneDriveBackend::tr("Using OneDrive for Business");
                 break;
             case QtCloudBackup::StorageType::OneDrivePersonal:
                 status = QtCloudBackup::StorageStatus::Ready;
-                detail = tr("Using OneDrive");
+                detail = WindowsOneDriveBackend::tr("Using OneDrive");
                 break;
             case QtCloudBackup::StorageType::LocalDirectory:
                 status = QtCloudBackup::StorageStatus::LocalFallback;
-                detail = tr("Using local Documents folder");
+                detail = WindowsOneDriveBackend::tr("Using local Documents folder");
                 break;
             default:
                 status = QtCloudBackup::StorageStatus::LocalFallback;
-                detail = tr("Using local storage");
+                detail = WindowsOneDriveBackend::tr("Using local storage");
                 break;
             }
         }
@@ -145,12 +151,13 @@ void WindowsOneDriveBackend::initialise()
         auto finalType = ok ? chosenType : QtCloudBackup::StorageType::None;
         auto finalRoot = ok ? chosenRoot : QString();
 
-        QMetaObject::invokeMethod(this, [this, status, detail, finalType, finalRoot] {
-            m_backupRoot = finalRoot;
-            m_status = status;
-            m_statusDetail = detail;
-            m_storageType = finalType;
-            emit statusChanged(m_status, m_statusDetail);
+        QMetaObject::invokeMethod(qApp, [self, status, detail, finalType, finalRoot] {
+            if (!self) return;
+            self->m_backupRoot = finalRoot;
+            self->m_status = status;
+            self->m_statusDetail = detail;
+            self->m_storageType = finalType;
+            emit self->statusChanged(self->m_status, self->m_statusDetail);
         }, Qt::QueuedConnection);
     });
 }
@@ -174,24 +181,28 @@ void WindowsOneDriveBackend::writeBackup(const QString &filename, const QByteArr
                                            const QJsonObject &meta)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename, data, meta] {
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename, data, meta] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath;
-        metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
         // Write .bak file atomically
         {
             QSaveFile file(bakPath);
             if (!file.open(QIODevice::WriteOnly)) {
-                QMetaObject::invokeMethod(this, [this, reason = tr("Failed to open backup file for writing")] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self,
+                        reason = WindowsOneDriveBackend::tr("Failed to open backup file for writing")] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
             file.write(data);
             if (!file.commit()) {
-                QMetaObject::invokeMethod(this, [this, reason = tr("Failed to write backup file")] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self,
+                        reason = WindowsOneDriveBackend::tr("Failed to write backup file")] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -201,22 +212,27 @@ void WindowsOneDriveBackend::writeBackup(const QString &filename, const QByteArr
         {
             QSaveFile file(metaPath);
             if (!file.open(QIODevice::WriteOnly)) {
-                QMetaObject::invokeMethod(this, [this, reason = tr("Failed to open metadata file for writing")] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self,
+                        reason = WindowsOneDriveBackend::tr("Failed to open metadata file for writing")] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
             file.write(QJsonDocument(meta).toJson(QJsonDocument::Compact));
             if (!file.commit()) {
-                QMetaObject::invokeMethod(this, [this, reason = tr("Failed to write metadata file")] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self,
+                        reason = WindowsOneDriveBackend::tr("Failed to write metadata file")] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
         }
 
-        QMetaObject::invokeMethod(this, [this, filename] {
-            emit writeSucceeded(filename);
+        QMetaObject::invokeMethod(qApp, [self, filename] {
+            if (!self) return;
+            emit self->writeSucceeded(filename);
         }, Qt::QueuedConnection);
     });
 }
@@ -224,20 +240,23 @@ void WindowsOneDriveBackend::writeBackup(const QString &filename, const QByteArr
 void WindowsOneDriveBackend::readBackup(const QString &filename)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename] {
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath;
-        metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
         // Emit indeterminate progress — QFile::open() may block during hydration
-        QMetaObject::invokeMethod(this, [this, filename] {
-            emit downloadProgress(filename, 0, -1);
+        QMetaObject::invokeMethod(qApp, [self, filename] {
+            if (!self) return;
+            emit self->downloadProgress(filename, 0, -1);
         }, Qt::QueuedConnection);
 
         QFile bakFile(bakPath);
         if (!bakFile.open(QIODevice::ReadOnly)) {
-            QMetaObject::invokeMethod(this, [this, filename, reason = tr("Failed to open backup file for reading")] {
-                emit readFailed(filename, reason);
+            QMetaObject::invokeMethod(qApp, [self, filename,
+                    reason = WindowsOneDriveBackend::tr("Failed to open backup file for reading")] {
+                if (!self) return;
+                emit self->readFailed(filename, reason);
             }, Qt::QueuedConnection);
             return;
         }
@@ -246,11 +265,12 @@ void WindowsOneDriveBackend::readBackup(const QString &filename)
         QJsonObject meta;
         QFile metaFile(metaPath);
         if (metaFile.open(QIODevice::ReadOnly)) {
-            meta = QJsonDocument::fromJson(metaFile.readAll()).object();
+            meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
         }
 
-        QMetaObject::invokeMethod(this, [this, filename, data, meta] {
-            emit readSucceeded(filename, data, meta);
+        QMetaObject::invokeMethod(qApp, [self, filename, data, meta] {
+            if (!self) return;
+            emit self->readSucceeded(filename, data, meta);
         }, Qt::QueuedConnection);
     });
 }
@@ -258,17 +278,18 @@ void WindowsOneDriveBackend::readBackup(const QString &filename)
 void WindowsOneDriveBackend::deleteBackup(const QString &filename)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename] {
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath;
-        metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
         bool ok = QFile::remove(bakPath);
         QFile::remove(metaPath); // Best effort
 
-        QMetaObject::invokeMethod(this, [this, filename, ok] {
-            emit deleteCompleted(filename, ok,
-                                 ok ? QString() : tr("Failed to delete backup file"));
+        QMetaObject::invokeMethod(qApp, [self, filename, ok] {
+            if (!self) return;
+            emit self->deleteCompleted(filename, ok,
+                                 ok ? QString() : WindowsOneDriveBackend::tr("Failed to delete backup file"));
         }, Qt::QueuedConnection);
     });
 }
@@ -276,7 +297,8 @@ void WindowsOneDriveBackend::deleteBackup(const QString &filename)
 void WindowsOneDriveBackend::scanBackups()
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir] {
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, dir] {
         QDir d(dir);
         QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
                                           QDir::Files, QDir::Name);
@@ -299,12 +321,11 @@ void WindowsOneDriveBackend::scanBackups()
                 info.downloadState = QtCloudBackup::DownloadState::Local;
             }
 
-            // Try to read .meta sidecar
-            QString metaPath = dir + QLatin1Char('/') + entry;
-            metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+            // Try to read .meta sidecar (bounded)
+            QString metaPath = dir + QLatin1Char('/') + entry.chopped(4) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
-                QJsonObject meta = QJsonDocument::fromJson(metaFile.readAll()).object();
+                QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
                 info.sourceId = meta[QStringLiteral("sourceId")].toString();
                 info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
                                                         Qt::ISODateWithMs);
@@ -325,8 +346,9 @@ void WindowsOneDriveBackend::scanBackups()
             backups.append(info);
         }
 
-        QMetaObject::invokeMethod(this, [this, backups] {
-            emit scanCompleted(backups);
+        QMetaObject::invokeMethod(qApp, [self, backups] {
+            if (!self) return;
+            emit self->scanCompleted(backups);
         }, Qt::QueuedConnection);
     });
 }
@@ -334,12 +356,14 @@ void WindowsOneDriveBackend::scanBackups()
 void WindowsOneDriveBackend::triggerDownload(const QString &filename)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename] {
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename] {
         QString fullPath = dir + QLatin1Char('/') + filename;
 
         // Emit indeterminate progress
-        QMetaObject::invokeMethod(this, [this, filename] {
-            emit downloadProgress(filename, 0, -1);
+        QMetaObject::invokeMethod(qApp, [self, filename] {
+            if (!self) return;
+            emit self->downloadProgress(filename, 0, -1);
         }, Qt::QueuedConnection);
 
         // Opening the file triggers transparent hydration on OneDrive
@@ -348,9 +372,10 @@ void WindowsOneDriveBackend::triggerDownload(const QString &filename)
         if (ok)
             file.close();
 
-        QMetaObject::invokeMethod(this, [this, filename, ok] {
-            emit downloadCompleted(filename, ok,
-                                   ok ? QString() : tr("Failed to download backup file"));
+        QMetaObject::invokeMethod(qApp, [self, filename, ok] {
+            if (!self) return;
+            emit self->downloadCompleted(filename, ok,
+                                   ok ? QString() : WindowsOneDriveBackend::tr("Failed to download backup file"));
         }, Qt::QueuedConnection);
     });
 }

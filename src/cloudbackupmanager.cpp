@@ -128,6 +128,9 @@ void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray 
         emit backupFailed(tr("Source ID is empty after sanitization"));
         return;
     }
+    if (sanitized.length() > 64) {
+        sanitized.truncate(64);
+    }
 
     m_backupInProgress = true;
     emit backupInProgressChanged();

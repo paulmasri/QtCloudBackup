@@ -1,5 +1,6 @@
 #include "appleicloudbackend.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -12,6 +13,8 @@
 #ifndef QTCLOUDBACKUP_ICLOUD_CONTAINER
 #define QTCLOUDBACKUP_ICLOUD_CONTAINER ""
 #endif
+
+static constexpr qint64 MaxMetaFileSize = 1024 * 1024; // 1 MB
 
 static NSString *containerIdentifier()
 {
@@ -39,13 +42,14 @@ void AppleICloudBackend::initialise()
 {
     // Observe iCloud account changes
     if (!m_notificationObserver) {
-        auto *backend = this;
+        QPointer<AppleICloudBackend> self(this);
         id observer = [[NSNotificationCenter defaultCenter]
             addObserverForName:NSUbiquityIdentityDidChangeNotification
                         object:nil
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification *) {
-                        backend->initialise();
+                        if (self)
+                            self->initialise();
                     }];
         m_notificationObserver = (void *)CFBridgingRetain(observer);
     }
@@ -62,18 +66,21 @@ void AppleICloudBackend::initialise()
     }
 
     // Resolve container URL off main thread — blocks on first call
-    (void)QtConcurrent::run([this] {
+    QPointer<AppleICloudBackend> self(this);
+    (void)QtConcurrent::run([self] {
         @autoreleasepool {
             NSURL *url = [[NSFileManager defaultManager]
                 URLForUbiquityContainerIdentifier:containerIdentifier()];
 
             if (!url) {
-                QMetaObject::invokeMethod(this, [this] {
-                    m_status = QtCloudBackup::StorageStatus::Disabled;
-                    m_statusDetail = tr("iCloud container is not available — check entitlements and provisioning profile");
-                    m_containerUrl.clear();
-                    stopMetadataQuery();
-                    emit statusChanged(m_status, m_statusDetail);
+                QMetaObject::invokeMethod(qApp, [self] {
+                    if (!self) return;
+                    self->m_status = QtCloudBackup::StorageStatus::Disabled;
+                    self->m_statusDetail = AppleICloudBackend::tr(
+                        "iCloud container is not available — check entitlements and provisioning profile");
+                    self->m_containerUrl.clear();
+                    self->stopMetadataQuery();
+                    emit self->statusChanged(self->m_status, self->m_statusDetail);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -88,12 +95,13 @@ void AppleICloudBackend::initialise()
 
             QString containerPath = QString::fromNSString(backupsUrl.path);
 
-            QMetaObject::invokeMethod(this, [this, containerPath] {
-                m_containerUrl = QUrl::fromLocalFile(containerPath);
-                m_status = QtCloudBackup::StorageStatus::Ready;
-                m_statusDetail = tr("iCloud storage is available");
-                emit statusChanged(m_status, m_statusDetail);
-                startMetadataQuery();
+            QMetaObject::invokeMethod(qApp, [self, containerPath] {
+                if (!self) return;
+                self->m_containerUrl = QUrl::fromLocalFile(containerPath);
+                self->m_status = QtCloudBackup::StorageStatus::Ready;
+                self->m_statusDetail = AppleICloudBackend::tr("iCloud storage is available");
+                emit self->statusChanged(self->m_status, self->m_statusDetail);
+                self->startMetadataQuery();
             }, Qt::QueuedConnection);
         }
     });
@@ -123,7 +131,8 @@ QString AppleICloudBackend::backupDir() const
 
 void AppleICloudBackend::startMetadataQuery()
 {
-    if (m_metadataQuery)
+    QMutexLocker locker(&m_queryGuard->mutex);
+    if (m_queryGuard->query)
         return;
 
     @autoreleasepool {
@@ -157,21 +166,22 @@ void AppleICloudBackend::startMetadataQuery()
                     }];
 
         [query startQuery];
-        m_metadataQuery = (void *)CFBridgingRetain(query);
+        m_queryGuard->query = (void *)CFBridgingRetain(query);
     }
 }
 
 void AppleICloudBackend::stopMetadataQuery()
 {
-    if (!m_metadataQuery)
+    QMutexLocker locker(&m_queryGuard->mutex);
+    if (!m_queryGuard->query)
         return;
 
     @autoreleasepool {
-        NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_metadataQuery;
+        NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_queryGuard->query;
         [query stopQuery];
         [[NSNotificationCenter defaultCenter] removeObserver:query];
-        CFRelease(m_metadataQuery);
-        m_metadataQuery = nullptr;
+        CFRelease(m_queryGuard->query);
+        m_queryGuard->query = nullptr;
     }
 }
 
@@ -180,11 +190,12 @@ void AppleICloudBackend::handleQueryResults()
     // Called from NSMetadataQuery notifications on the main thread.
     // Access the query's results array (safe) rather than notification
     // userInfo items (proxy objects that can be deallocated).
-    if (!m_metadataQuery)
+    QMutexLocker locker(&m_queryGuard->mutex);
+    if (!m_queryGuard->query)
         return;
 
     @autoreleasepool {
-        NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_metadataQuery;
+        NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_queryGuard->query;
         [query disableUpdates];
 
         static const QRegularExpression re(
@@ -203,6 +214,7 @@ void AppleICloudBackend::handleQueryResults()
         }
 
         [query enableUpdates];
+        locker.unlock();
 
         for (const QString &sourceId : sourceIds)
             emit remoteChangeDetected(sourceId);
@@ -215,11 +227,11 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
                                       const QJsonObject &meta)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename, data, meta] {
+    QPointer<AppleICloudBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename, data, meta] {
         @autoreleasepool {
             QString bakPath = dir + QLatin1Char('/') + filename;
-            QString metaPath = bakPath;
-            metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+            QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
             NSURL *bakUrl = [NSURL fileURLWithPath:bakPath.toNSString()];
             NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
@@ -234,25 +246,27 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
                                            options:NSFileCoordinatorWritingForReplacing
                                              error:&coordError
                                         byAccessor:^(NSURL *newURL) {
-                NSData *nsData = [NSData dataWithBytes:data.constData() length:data.size()];
+                NSData *nsData = [NSData dataWithBytes:data.constData()
+                                                length:static_cast<NSUInteger>(data.size())];
                 NSError *writeError = nil;
                 if (![nsData writeToURL:newURL options:NSDataWritingAtomic error:&writeError]) {
                     success = false;
-                    errorReason = tr("Failed to write backup file: %1")
+                    errorReason = AppleICloudBackend::tr("Failed to write backup file: %1")
                         .arg(QString::fromNSString(writeError.localizedDescription));
                 }
             }];
 
             if (coordError) {
                 success = false;
-                errorReason = tr("File coordination failed for backup: %1")
+                errorReason = AppleICloudBackend::tr("File coordination failed for backup: %1")
                     .arg(QString::fromNSString(coordError.localizedDescription));
             }
 
             if (!success) {
                 QString reason = errorReason;
-                QMetaObject::invokeMethod(this, [this, reason] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self, reason] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -264,18 +278,19 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
                                              error:&metaCoordError
                                         byAccessor:^(NSURL *newURL) {
                 QByteArray metaJson = QJsonDocument(meta).toJson(QJsonDocument::Compact);
-                NSData *nsData = [NSData dataWithBytes:metaJson.constData() length:metaJson.size()];
+                NSData *nsData = [NSData dataWithBytes:metaJson.constData()
+                                                length:static_cast<NSUInteger>(metaJson.size())];
                 NSError *writeError = nil;
                 if (![nsData writeToURL:newURL options:NSDataWritingAtomic error:&writeError]) {
                     success = false;
-                    errorReason = tr("Failed to write metadata file: %1")
+                    errorReason = AppleICloudBackend::tr("Failed to write metadata file: %1")
                         .arg(QString::fromNSString(writeError.localizedDescription));
                 }
             }];
 
             if (metaCoordError) {
                 success = false;
-                errorReason = tr("File coordination failed for metadata: %1")
+                errorReason = AppleICloudBackend::tr("File coordination failed for metadata: %1")
                     .arg(QString::fromNSString(metaCoordError.localizedDescription));
             }
 
@@ -283,14 +298,16 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
                 // Remove the .bak file since meta failed
                 [[NSFileManager defaultManager] removeItemAtURL:bakUrl error:nil];
                 QString reason = errorReason;
-                QMetaObject::invokeMethod(this, [this, reason] {
-                    emit writeFailed(reason);
+                QMetaObject::invokeMethod(qApp, [self, reason] {
+                    if (!self) return;
+                    emit self->writeFailed(reason);
                 }, Qt::QueuedConnection);
                 return;
             }
 
-            QMetaObject::invokeMethod(this, [this, filename] {
-                emit writeSucceeded(filename);
+            QMetaObject::invokeMethod(qApp, [self, filename] {
+                if (!self) return;
+                emit self->writeSucceeded(filename);
             }, Qt::QueuedConnection);
         }
     });
@@ -299,35 +316,37 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
 void AppleICloudBackend::readBackup(const QString &filename)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename] {
+    QPointer<AppleICloudBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename] {
         @autoreleasepool {
             QString bakPath = dir + QLatin1Char('/') + filename;
-            QString metaPath = bakPath;
-            metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+            QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
             NSURL *bakUrl = [NSURL fileURLWithPath:bakPath.toNSString()];
 
             // Check if file needs downloading first
-            NSNumber *isDownloaded = nil;
-            [bakUrl getResourceValue:&isDownloaded
+            NSString *downloadStatus = nil;
+            [bakUrl getResourceValue:&downloadStatus
                               forKey:NSURLUbiquitousItemDownloadingStatusKey
                                error:nil];
-            if (isDownloaded &&
-                [isDownloaded isEqual:NSURLUbiquitousItemDownloadingStatusNotDownloaded]) {
+            if ([downloadStatus isEqual:NSURLUbiquitousItemDownloadingStatusNotDownloaded]) {
                 // Trigger download and report — caller should wait for downloadReady
                 NSError *dlError = nil;
                 [[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:bakUrl
                                                                              error:&dlError];
                 if (dlError) {
-                    QMetaObject::invokeMethod(this, [this, filename,
-                            reason = tr("Failed to start download: %1")
+                    QMetaObject::invokeMethod(qApp, [self, filename,
+                            reason = AppleICloudBackend::tr("Failed to start download: %1")
                                 .arg(QString::fromNSString(dlError.localizedDescription))] {
-                        emit readFailed(filename, reason);
+                        if (!self) return;
+                        emit self->readFailed(filename, reason);
                     }, Qt::QueuedConnection);
                 } else {
-                    QMetaObject::invokeMethod(this, [this, filename,
-                            reason = tr("File is cloud-only — download triggered, retry after downloadReady")] {
-                        emit readFailed(filename, reason);
+                    QMetaObject::invokeMethod(qApp, [self, filename,
+                            reason = AppleICloudBackend::tr(
+                                "File is cloud-only — download triggered, retry after downloadReady")] {
+                        if (!self) return;
+                        emit self->readFailed(filename, reason);
                     }, Qt::QueuedConnection);
                 }
                 return;
@@ -347,40 +366,42 @@ void AppleICloudBackend::readBackup(const QString &filename)
                 NSData *nsData = [NSData dataWithContentsOfURL:newURL];
                 if (nsData) {
                     data = QByteArray(reinterpret_cast<const char *>(nsData.bytes),
-                                     static_cast<int>(nsData.length));
+                                     static_cast<qsizetype>(nsData.length));
                 } else {
                     success = false;
-                    errorReason = tr("Failed to read backup file");
+                    errorReason = AppleICloudBackend::tr("Failed to read backup file");
                 }
             }];
 
             if (coordError) {
                 success = false;
-                errorReason = tr("File coordination failed for read: %1")
+                errorReason = AppleICloudBackend::tr("File coordination failed for read: %1")
                     .arg(QString::fromNSString(coordError.localizedDescription));
             }
 
             if (!success) {
                 QString reason = errorReason;
-                QMetaObject::invokeMethod(this, [this, filename, reason] {
-                    emit readFailed(filename, reason);
+                QMetaObject::invokeMethod(qApp, [self, filename, reason] {
+                    if (!self) return;
+                    emit self->readFailed(filename, reason);
                 }, Qt::QueuedConnection);
                 return;
             }
 
-            // Read metadata (best effort, no coordination needed for small file)
+            // Read metadata (best effort, bounded read)
             QJsonObject meta;
             NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
             NSData *metaData = [NSData dataWithContentsOfURL:metaUrl];
-            if (metaData) {
+            if (metaData && static_cast<qint64>(metaData.length) <= MaxMetaFileSize) {
                 QByteArray metaBytes(reinterpret_cast<const char *>(metaData.bytes),
-                                     static_cast<int>(metaData.length));
+                                     static_cast<qsizetype>(metaData.length));
                 meta = QJsonDocument::fromJson(metaBytes).object();
             }
 
             QByteArray readData = data;
-            QMetaObject::invokeMethod(this, [this, filename, readData, meta] {
-                emit readSucceeded(filename, readData, meta);
+            QMetaObject::invokeMethod(qApp, [self, filename, readData, meta] {
+                if (!self) return;
+                emit self->readSucceeded(filename, readData, meta);
             }, Qt::QueuedConnection);
         }
     });
@@ -389,11 +410,11 @@ void AppleICloudBackend::readBackup(const QString &filename)
 void AppleICloudBackend::deleteBackup(const QString &filename)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename] {
+    QPointer<AppleICloudBackend> self(this);
+    (void)QtConcurrent::run([self, dir, filename] {
         @autoreleasepool {
             QString bakPath = dir + QLatin1Char('/') + filename;
-            QString metaPath = bakPath;
-            metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+            QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
 
             NSURL *bakUrl = [NSURL fileURLWithPath:bakPath.toNSString()];
             NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
@@ -410,14 +431,14 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
                 NSError *removeError = nil;
                 if (![[NSFileManager defaultManager] removeItemAtURL:newURL error:&removeError]) {
                     success = false;
-                    errorReason = tr("Failed to delete backup file: %1")
+                    errorReason = AppleICloudBackend::tr("Failed to delete backup file: %1")
                         .arg(QString::fromNSString(removeError.localizedDescription));
                 }
             }];
 
             if (coordError) {
                 success = false;
-                errorReason = tr("File coordination failed for delete: %1")
+                errorReason = AppleICloudBackend::tr("File coordination failed for delete: %1")
                     .arg(QString::fromNSString(coordError.localizedDescription));
             }
 
@@ -433,8 +454,9 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
 
             bool deleteOk = success;
             QString reason = errorReason;
-            QMetaObject::invokeMethod(this, [this, filename, deleteOk, reason] {
-                emit deleteCompleted(filename, deleteOk, reason);
+            QMetaObject::invokeMethod(qApp, [self, filename, deleteOk, reason] {
+                if (!self) return;
+                emit self->deleteCompleted(filename, deleteOk, reason);
             }, Qt::QueuedConnection);
         }
     });
@@ -443,7 +465,9 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
 void AppleICloudBackend::scanBackups()
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir] {
+    QPointer<AppleICloudBackend> self(this);
+    auto queryGuard = m_queryGuard; // shared_ptr copy for thread safety
+    (void)QtConcurrent::run([self, dir, queryGuard] {
         @autoreleasepool {
             QList<BackupInfo> backups;
 
@@ -476,12 +500,11 @@ void AppleICloudBackend::scanBackups()
                     info.downloadState = QtCloudBackup::DownloadState::Downloading;
                 }
 
-                // Try to read .meta sidecar
-                QString metaPath = dir + QLatin1Char('/') + entry;
-                metaPath.replace(QStringLiteral(".bak"), QStringLiteral(".meta"));
+                // Try to read .meta sidecar (bounded)
+                QString metaPath = dir + QLatin1Char('/') + entry.chopped(4) + QStringLiteral(".meta");
                 QFile metaFile(metaPath);
                 if (metaFile.open(QIODevice::ReadOnly)) {
-                    QJsonObject meta = QJsonDocument::fromJson(metaFile.readAll()).object();
+                    QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
                     info.sourceId = meta[QStringLiteral("sourceId")].toString();
                     info.timestamp = QDateTime::fromString(
                         meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
@@ -502,51 +525,56 @@ void AppleICloudBackend::scanBackups()
                 backups.append(info);
             }
 
-            // Also query NSMetadataQuery for cloud-only files not in directory listing
-            if (m_metadataQuery) {
-                NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_metadataQuery;
-                [query disableUpdates];
+            // Also query NSMetadataQuery for cloud-only files not in directory listing.
+            // Access via shared queryGuard — safe even if the backend is destroyed.
+            {
+                QMutexLocker locker(&queryGuard->mutex);
+                if (queryGuard->query) {
+                    NSMetadataQuery *query = (__bridge NSMetadataQuery *)queryGuard->query;
+                    [query disableUpdates];
 
-                QSet<QString> localFilenames;
-                for (const auto &b : backups)
-                    localFilenames.insert(b.filename);
+                    QSet<QString> localFilenames;
+                    for (const auto &b : backups)
+                        localFilenames.insert(b.filename);
 
-                for (NSUInteger i = 0; i < query.resultCount; i++) {
-                    NSMetadataItem *item = [query resultAtIndex:i];
-                    NSString *name = [item valueForAttribute:NSMetadataItemFSNameKey];
-                    QString qName = QString::fromNSString(name);
+                    for (NSUInteger i = 0; i < query.resultCount; i++) {
+                        NSMetadataItem *item = [query resultAtIndex:i];
+                        NSString *name = [item valueForAttribute:NSMetadataItemFSNameKey];
+                        QString qName = QString::fromNSString(name);
 
-                    if (localFilenames.contains(qName))
-                        continue; // Already found via QDir
+                        if (localFilenames.contains(qName))
+                            continue; // Already found via QDir
 
-                    BackupInfo info;
-                    info.filename = qName;
-                    info.downloadState = QtCloudBackup::DownloadState::CloudOnly;
+                        BackupInfo info;
+                        info.filename = qName;
+                        info.downloadState = QtCloudBackup::DownloadState::CloudOnly;
 
-                    // Check download percentage
-                    NSNumber *percent = [item valueForAttribute:
-                        NSMetadataUbiquitousItemPercentDownloadedKey];
-                    if (percent && percent.doubleValue > 0 && percent.doubleValue < 100) {
-                        info.downloadState = QtCloudBackup::DownloadState::Downloading;
+                        // Check download percentage
+                        NSNumber *percent = [item valueForAttribute:
+                            NSMetadataUbiquitousItemPercentDownloadedKey];
+                        if (percent && percent.doubleValue > 0 && percent.doubleValue < 100) {
+                            info.downloadState = QtCloudBackup::DownloadState::Downloading;
+                        }
+
+                        // Parse filename for metadata
+                        auto match = re.match(qName);
+                        if (match.hasMatch()) {
+                            info.sourceId = match.captured(1);
+                            info.timestamp = QDateTime::fromString(
+                                match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
+                            info.timestamp.setTimeZone(QTimeZone::utc());
+                        }
+
+                        backups.append(info);
                     }
 
-                    // Parse filename for metadata
-                    auto match = re.match(qName);
-                    if (match.hasMatch()) {
-                        info.sourceId = match.captured(1);
-                        info.timestamp = QDateTime::fromString(
-                            match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
-                        info.timestamp.setTimeZone(QTimeZone::utc());
-                    }
-
-                    backups.append(info);
+                    [query enableUpdates];
                 }
-
-                [query enableUpdates];
             }
 
-            QMetaObject::invokeMethod(this, [this, backups] {
-                emit scanCompleted(backups);
+            QMetaObject::invokeMethod(qApp, [self, backups] {
+                if (!self) return;
+                emit self->scanCompleted(backups);
             }, Qt::QueuedConnection);
         }
     });
@@ -555,7 +583,9 @@ void AppleICloudBackend::scanBackups()
 void AppleICloudBackend::triggerDownload(const QString &filename)
 {
     QString dir = backupDir();
-    (void)QtConcurrent::run([this, dir, filename] {
+    QPointer<AppleICloudBackend> self(this);
+    auto queryGuard = m_queryGuard; // shared_ptr copy for thread safety
+    (void)QtConcurrent::run([self, dir, filename, queryGuard] {
         @autoreleasepool {
             QString fullPath = dir + QLatin1Char('/') + filename;
             NSURL *fileUrl = [NSURL fileURLWithPath:fullPath.toNSString()];
@@ -564,10 +594,12 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
             if (![[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:fileUrl
                                                                                error:&error]) {
                 QString reason = error
-                    ? tr("Failed to start download: %1").arg(QString::fromNSString(error.localizedDescription))
-                    : tr("Failed to start download");
-                QMetaObject::invokeMethod(this, [this, filename, reason] {
-                    emit downloadCompleted(filename, false, reason);
+                    ? AppleICloudBackend::tr("Failed to start download: %1")
+                          .arg(QString::fromNSString(error.localizedDescription))
+                    : AppleICloudBackend::tr("Failed to start download");
+                QMetaObject::invokeMethod(qApp, [self, filename, reason] {
+                    if (!self) return;
+                    emit self->downloadCompleted(filename, false, reason);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -602,27 +634,32 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
                     }
                 }
 
-                // Report progress if available via NSMetadataQuery
+                // Report progress if available via NSMetadataQuery.
+                // Access via shared queryGuard — safe even if backend is destroyed.
                 NSNumber *percent = nil;
-                if (m_metadataQuery) {
-                    NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_metadataQuery;
-                    [query disableUpdates];
-                    for (NSUInteger i = 0; i < query.resultCount; i++) {
-                        NSMetadataItem *item = [query resultAtIndex:i];
-                        NSString *itemName = [item valueForAttribute:NSMetadataItemFSNameKey];
-                        if ([itemName isEqualToString:filename.toNSString()]) {
-                            percent = [item valueForAttribute:
-                                NSMetadataUbiquitousItemPercentDownloadedKey];
-                            break;
+                {
+                    QMutexLocker locker(&queryGuard->mutex);
+                    if (queryGuard->query) {
+                        NSMetadataQuery *query = (__bridge NSMetadataQuery *)queryGuard->query;
+                        [query disableUpdates];
+                        for (NSUInteger i = 0; i < query.resultCount; i++) {
+                            NSMetadataItem *item = [query resultAtIndex:i];
+                            NSString *itemName = [item valueForAttribute:NSMetadataItemFSNameKey];
+                            if ([itemName isEqualToString:filename.toNSString()]) {
+                                percent = [item valueForAttribute:
+                                    NSMetadataUbiquitousItemPercentDownloadedKey];
+                                break;
+                            }
                         }
+                        [query enableUpdates];
                     }
-                    [query enableUpdates];
                 }
 
                 if (percent) {
                     qint64 received = static_cast<qint64>(percent.doubleValue);
-                    QMetaObject::invokeMethod(this, [this, filename, received] {
-                        emit downloadProgress(filename, received, 100);
+                    QMetaObject::invokeMethod(qApp, [self, filename, received] {
+                        if (!self) return;
+                        emit self->downloadProgress(filename, received, 100);
                     }, Qt::QueuedConnection);
                 }
 
@@ -630,13 +667,15 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
             }
 
             if (downloaded) {
-                QMetaObject::invokeMethod(this, [this, filename] {
-                    emit downloadCompleted(filename, true, QString());
+                QMetaObject::invokeMethod(qApp, [self, filename] {
+                    if (!self) return;
+                    emit self->downloadCompleted(filename, true, QString());
                 }, Qt::QueuedConnection);
             } else {
-                QMetaObject::invokeMethod(this, [this, filename,
-                        reason = tr("Download timed out")] {
-                    emit downloadCompleted(filename, false, reason);
+                QMetaObject::invokeMethod(qApp, [self, filename,
+                        reason = AppleICloudBackend::tr("Download timed out")] {
+                    if (!self) return;
+                    emit self->downloadCompleted(filename, false, reason);
                 }, Qt::QueuedConnection);
             }
         }
