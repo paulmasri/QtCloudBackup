@@ -133,6 +133,7 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 | `storageType` | `StorageType` | Which backend is active |
 | `backupInProgress` | `bool` | Whether a create/restore operation is running |
 | `maxBackupsPerSource` | `int` | Pruning threshold per source ID (default: 3) |
+| `hasOrphanedBackups` | `bool` | Whether orphaned backups were found (see [Orphaned backup migration](#orphaned-backup-migration)) |
 
 ### Methods (Q_INVOKABLE)
 
@@ -144,6 +145,8 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
 | `deleteBackup(filename)` | Delete a backup and its metadata sidecar |
 | `refresh()` | Re-check cloud availability and reinitialise |
+| `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
+| `migrateOrphanedBackups()` | Move detected orphans to the active backend |
 
 ### Signals
 
@@ -158,6 +161,8 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 | `downloadProgressChanged(filename, bytesReceived, bytesTotal)` | Download progress (`bytesTotal == -1` means indeterminate) |
 | `deleteSucceeded(filename)` / `deleteFailed(filename, reason)` | Delete result |
 | `remoteBackupDetected(sourceId)` | A new backup appeared from another device |
+| `orphanedBackupsDetected(orphans)` | Orphan scan complete; `orphans` is a `QVariantList` of `OrphanedBackupInfo` |
+| `migrationUpdated(status, migratedCount, totalCount, reason)` | Migration progress/result (see MigrationStatus enum) |
 
 ### Enums
 
@@ -170,6 +175,8 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 **RestoreStatus**: `RestoreDownloading`, `RestoreInProgress`, `RestoreSucceeded`, `RestoreFailed`
 
 **DownloadStatus**: `DownloadInProgress`, `DownloadSucceeded`, `DownloadFailed`
+
+**MigrationStatus**: `MigrationInProgress`, `MigrationSucceeded`, `MigrationFailed`
 
 ## QML usage example
 
@@ -263,6 +270,77 @@ manager->listBackups();
 ## How pruning works
 
 After each successful `createBackup()`, the manager scans for all backups matching the same `sourceId` and deletes the oldest ones that exceed `maxBackupsPerSource` (default: 3). Pruning happens automatically — the consuming app does not need to manage it.
+
+## Orphaned backup migration
+
+*This feature is optional. Apps that don't need it can ignore these methods entirely — the library never auto-checks or auto-migrates.*
+
+When storage availability changes between sessions — for example, the user signs into iCloud, installs OneDrive, or switches from OneDrive Personal to Commercial — the library selects a higher-priority backend on next launch. Backups created in the previous location still exist on disk but are no longer visible through `listBackups()`.
+
+`checkForOrphanedBackups()` scans lower-priority storage locations for these leftover files. If any are found, `orphanedBackupsDetected` emits a list of `OrphanedBackupInfo` items (each with `sourceId`, `timestamp`, `filename`, `originStorageType`, and `originPath`), and `hasOrphanedBackups` becomes `true`. The app can then present this information to the user and call `migrateOrphanedBackups()` if the user opts in. Migration copies the files to the active backend, deletes the originals, and reports progress via `migrationUpdated`.
+
+Both detection and migration are on-demand — the app decides when and whether to call them.
+
+### QML example
+
+```qml
+CloudBackupManager {
+    id: backupManager
+
+    onOrphanedBackupsDetected: (orphans) => {
+        if (orphans.length > 0)
+            migrationDialog.open()  // Let the user decide
+    }
+    onMigrationUpdated: (status, migratedCount, totalCount, reason) => {
+        if (status === CloudBackup.MigrationSucceeded)
+            console.log("Migrated", migratedCount, "backups")
+        else if (status === CloudBackup.MigrationFailed)
+            console.log("Migration failed:", reason)
+    }
+}
+
+// Call at startup or on a button press
+Component.onCompleted: backupManager.checkForOrphanedBackups()
+
+// After user confirms
+function doMigrate() {
+    backupManager.migrateOrphanedBackups()
+}
+```
+
+### C++ example
+
+```cpp
+connect(manager, &CloudBackupManager::orphanedBackupsDetected,
+        this, [](const QVariantList &orphans) {
+    qDebug() << "Found" << orphans.size() << "orphaned backups";
+    // Present to user, then call manager->migrateOrphanedBackups()
+});
+
+connect(manager, &CloudBackupManager::migrationUpdated,
+        this, [](QtCloudBackup::MigrationStatus status, int migrated,
+                 int total, const QString &reason) {
+    if (status == QtCloudBackup::MigrationStatus::MigrationSucceeded)
+        qDebug() << "Migrated" << migrated << "of" << total;
+});
+
+manager->checkForOrphanedBackups();
+```
+
+### What gets scanned
+
+| Active backend | Locations scanned for orphans |
+|---------------|-------------------------------|
+| iCloud | Local fallback (`AppLocalDataLocation/Backups/`) |
+| OneDrive Commercial | Lower-priority OneDrive candidates + local fallback |
+| OneDrive Personal | Local fallback |
+| Local fallback | Nothing (no lower-priority location exists) |
+
+### Edge cases
+
+- **Duplicate filenames**: files already present in the active location are skipped (likely from a previous partial migration).
+- **Partial failure**: migration continues past individual errors, reports `MigrationFailed` with the count of successes, and leaves failed originals in place for retry.
+- **iCloud signed out**: the local fallback backend is active, so there's nothing lower-priority to scan — `checkForOrphanedBackups()` returns an empty list. Orphans reappear when the user signs back in.
 
 ## Known limitations
 
