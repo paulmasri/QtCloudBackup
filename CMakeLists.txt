@@ -26,7 +26,12 @@ set(SOURCES
     src/platform/fallback/localbackend.cpp
 )
 
-if(WIN32)
+if(APPLE)
+    list(APPEND SOURCES
+        src/platform/apple/appleicloudbackend.h
+        src/platform/apple/appleicloudbackend.mm
+    )
+elseif(WIN32)
     list(APPEND SOURCES
         src/platform/windows/windowsonedrivebackend.h
         src/platform/windows/windowsonedrivebackend.cpp
