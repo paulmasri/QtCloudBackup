@@ -51,10 +51,11 @@ signals:
     void backupsListed(const QList<BackupInfo> &backups);
     void backupsListFailed(const QString &reason);
     void downloadProgressChanged(const QString &filename, qint64 bytesReceived, qint64 bytesTotal);
-    void downloadReady(const QString &filename);
-    void downloadFailed(const QString &filename, const QString &reason);
-    void restoreSucceeded(const QByteArray &data, const QVariantMap &metadata);
-    void restoreFailed(const QString &reason);
+    void downloadUpdated(const QString &filename, QtCloudBackup::DownloadStatus status,
+                         const QString &reason);
+    void restoreUpdated(const QString &filename, QtCloudBackup::RestoreStatus status,
+                        const QByteArray &data, const QVariantMap &metadata,
+                        const QString &reason);
     void deleteSucceeded(const QString &filename);
     void deleteFailed(const QString &filename, const QString &reason);
     void remoteBackupDetected(const QString &sourceId);
@@ -62,11 +63,14 @@ signals:
 private:
     void pruneBackups(const QString &sourceId);
 
+    void handleReadFailed(const QString &filename, const QString &reason);
+
     std::unique_ptr<CloudBackupBackend> m_backend;
     bool m_backupInProgress = false;
     int m_maxBackupsPerSource = 3;
     QString m_currentBackupSourceId;
     QDateTime m_currentBackupTimestamp;
+    QString m_pendingRestoreFilename; // set when auto-downloading for restore
 };
 
 #endif // QTCLOUDBACKUP_CLOUDBACKUPMANAGER_H

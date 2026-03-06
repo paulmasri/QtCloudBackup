@@ -37,6 +37,21 @@ enum class StorageType {
 };
 Q_ENUM_NS(StorageType)
 
+enum class RestoreStatus {
+    RestoreDownloading,
+    RestoreInProgress,
+    RestoreSucceeded,
+    RestoreFailed
+};
+Q_ENUM_NS(RestoreStatus)
+
+enum class DownloadStatus {
+    DownloadInProgress,
+    DownloadSucceeded,
+    DownloadFailed
+};
+Q_ENUM_NS(DownloadStatus)
+
 } // namespace QtCloudBackup
 
 class BackupInfo {
