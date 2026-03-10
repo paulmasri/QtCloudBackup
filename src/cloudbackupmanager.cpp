@@ -191,7 +191,7 @@ void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray 
     meta[QStringLiteral("sourceId")] = sanitized;
     meta[QStringLiteral("timestamp")] = m_currentBackupTimestamp.toString(Qt::ISODateWithMs);
     meta[QStringLiteral("metadata")] = QJsonObject::fromVariantMap(metadata);
-    meta[QStringLiteral("libraryVersion")] = QStringLiteral("1.0.0");
+    meta[QStringLiteral("libraryVersion")] = QStringLiteral(QTCLOUDBACKUP_VERSION);
 
     m_backend->writeBackup(filename, data, meta);
 }
