@@ -450,8 +450,13 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
                     .arg(QString::fromNSString(coordError.localizedDescription));
             }
 
-            // Delete meta sidecar (best effort)
-            [[NSFileManager defaultManager] removeItemAtURL:metaUrl error:nil];
+            // Delete meta sidecar
+            NSError *metaRemoveError = nil;
+            if (![[NSFileManager defaultManager] removeItemAtURL:metaUrl error:&metaRemoveError]
+                && metaRemoveError.code != NSFileNoSuchFileError) {
+                qWarning("Failed to remove metadata sidecar: %s",
+                         qPrintable(QString::fromNSString(metaRemoveError.localizedDescription)));
+            }
 
             // Resolve any file version conflicts
             NSArray *conflicts = [NSFileVersion unresolvedConflictVersionsOfItemAtURL:bakUrl];

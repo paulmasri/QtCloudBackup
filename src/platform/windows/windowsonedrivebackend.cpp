@@ -293,7 +293,8 @@ void WindowsOneDriveBackend::deleteBackup(const QString &filename)
         QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
         bool ok = QFile::remove(bakPath);
-        QFile::remove(metaPath); // Best effort
+        if (!QFile::remove(metaPath) && QFile::exists(metaPath))
+            qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
 
         QMetaObject::invokeMethod(qApp, [self, filename, ok] {
             if (!self) return;
