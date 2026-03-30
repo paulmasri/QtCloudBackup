@@ -187,7 +187,7 @@ void LocalBackend::scanBackups()
                                           QDir::Files, QDir::Name);
 
         static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
         QList<BackupInfo> backups;
         for (const QString &entry : entries) {

@@ -207,7 +207,7 @@ void AppleICloudBackend::handleQueryResults()
         [query disableUpdates];
 
         static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
         QSet<QString> sourceIds;
         for (NSUInteger i = 0; i < query.resultCount; i++) {
@@ -485,7 +485,7 @@ void AppleICloudBackend::scanBackups()
                                               QDir::Files, QDir::Name);
 
             static const QRegularExpression re(
-                QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+                QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
             for (const QString &entry : entries) {
                 BackupInfo info;
@@ -713,7 +713,7 @@ void AppleICloudBackend::scanOrphanedBackups()
                                               QDir::Files, QDir::Name);
 
             static const QRegularExpression re(
-                QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+                QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
             for (const QString &entry : entries) {
                 OrphanedBackupInfo info;
