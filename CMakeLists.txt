@@ -20,6 +20,7 @@ set(SOURCES
     src/cloudbackupmanager.cpp
     src/cloudbackupbackend.h
     src/backupinfo.h
+    src/backupvalidation.h
     src/platform/fallback/localbackend.h
     src/platform/fallback/localbackend.cpp
 )

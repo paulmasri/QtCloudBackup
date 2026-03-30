@@ -1,5 +1,6 @@
 #include "cloudbackupmanager.h"
 #include "cloudbackupbackend.h"
+#include "backupvalidation.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -162,7 +163,9 @@ void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray 
     // Sanitize sourceId
     QString sanitized;
     for (const QChar &c : sourceId) {
-        if (c.isLetterOrNumber() || c == QLatin1Char('-') || c == QLatin1Char('_'))
+        if ((c >= QLatin1Char('a') && c <= QLatin1Char('z'))
+            || (c >= QLatin1Char('A') && c <= QLatin1Char('Z'))
+            || c.isDigit() || c == QLatin1Char('-') || c == QLatin1Char('_'))
             sanitized.append(c);
     }
     if (sanitized.isEmpty()) {
@@ -203,12 +206,22 @@ void CloudBackupManager::listBackups()
 
 void CloudBackupManager::requestDownload(const QString &filename)
 {
+    if (!isValidBackupFilename(filename)) {
+        emit downloadUpdated(filename, QtCloudBackup::DownloadStatus::DownloadFailed,
+                             tr("Invalid backup filename"));
+        return;
+    }
     emit downloadUpdated(filename, QtCloudBackup::DownloadStatus::DownloadInProgress, {});
     m_backend->triggerDownload(filename);
 }
 
 void CloudBackupManager::restoreBackup(const QString &filename)
 {
+    if (!isValidBackupFilename(filename)) {
+        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
+                            tr("Invalid backup filename"));
+        return;
+    }
     if (m_backupInProgress)
         return;
 
@@ -221,6 +234,10 @@ void CloudBackupManager::restoreBackup(const QString &filename)
 
 void CloudBackupManager::deleteBackup(const QString &filename)
 {
+    if (!isValidBackupFilename(filename)) {
+        emit deleteFailed(filename, tr("Invalid backup filename"));
+        return;
+    }
     m_backend->deleteBackup(filename);
 }
 

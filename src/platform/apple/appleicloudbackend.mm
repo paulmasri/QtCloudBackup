@@ -1,4 +1,5 @@
 #include "appleicloudbackend.h"
+#include "backupvalidation.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -206,7 +207,7 @@ void AppleICloudBackend::handleQueryResults()
         [query disableUpdates];
 
         static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
         QSet<QString> sourceIds;
         for (NSUInteger i = 0; i < query.resultCount; i++) {
@@ -238,7 +239,7 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
     (void)QtConcurrent::run([self, dir, filename, data, meta] {
         @autoreleasepool {
             QString bakPath = dir + QLatin1Char('/') + filename;
-            QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+            QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
             NSURL *bakUrl = [NSURL fileURLWithPath:bakPath.toNSString()];
             NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
@@ -327,7 +328,7 @@ void AppleICloudBackend::readBackup(const QString &filename)
     (void)QtConcurrent::run([self, dir, filename] {
         @autoreleasepool {
             QString bakPath = dir + QLatin1Char('/') + filename;
-            QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+            QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
             NSURL *bakUrl = [NSURL fileURLWithPath:bakPath.toNSString()];
 
@@ -421,7 +422,7 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
     (void)QtConcurrent::run([self, dir, filename] {
         @autoreleasepool {
             QString bakPath = dir + QLatin1Char('/') + filename;
-            QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+            QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
             NSURL *bakUrl = [NSURL fileURLWithPath:bakPath.toNSString()];
             NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
@@ -449,8 +450,13 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
                     .arg(QString::fromNSString(coordError.localizedDescription));
             }
 
-            // Delete meta sidecar (best effort)
-            [[NSFileManager defaultManager] removeItemAtURL:metaUrl error:nil];
+            // Delete meta sidecar
+            NSError *metaRemoveError = nil;
+            if (![[NSFileManager defaultManager] removeItemAtURL:metaUrl error:&metaRemoveError]
+                && metaRemoveError.code != NSFileNoSuchFileError) {
+                qWarning("Failed to remove metadata sidecar: %s",
+                         qPrintable(QString::fromNSString(metaRemoveError.localizedDescription)));
+            }
 
             // Resolve any file version conflicts
             NSArray *conflicts = [NSFileVersion unresolvedConflictVersionsOfItemAtURL:bakUrl];
@@ -484,7 +490,7 @@ void AppleICloudBackend::scanBackups()
                                               QDir::Files, QDir::Name);
 
             static const QRegularExpression re(
-                QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+                QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
             for (const QString &entry : entries) {
                 BackupInfo info;
@@ -508,7 +514,7 @@ void AppleICloudBackend::scanBackups()
                 }
 
                 // Try to read .meta sidecar (bounded)
-                QString metaPath = dir + QLatin1Char('/') + entry.chopped(4) + QStringLiteral(".meta");
+                QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
                 QFile metaFile(metaPath);
                 if (metaFile.open(QIODevice::ReadOnly)) {
                     QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
@@ -712,7 +718,7 @@ void AppleICloudBackend::scanOrphanedBackups()
                                               QDir::Files, QDir::Name);
 
             static const QRegularExpression re(
-                QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+                QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
             for (const QString &entry : entries) {
                 OrphanedBackupInfo info;
@@ -721,7 +727,7 @@ void AppleICloudBackend::scanOrphanedBackups()
                 info.originPath = fallbackDir;
 
                 // Try to read .meta sidecar
-                QString metaPath = fallbackDir + QLatin1Char('/') + entry.chopped(4)
+                QString metaPath = fallbackDir + QLatin1Char('/') + backupStem(entry)
                                    + QStringLiteral(".meta");
                 QFile metaFile(metaPath);
                 if (metaFile.open(QIODevice::ReadOnly)) {
@@ -791,10 +797,10 @@ void AppleICloudBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> 
                 const auto &orphan = orphans[i];
                 QString srcBak = orphan.originPath + QLatin1Char('/') + orphan.filename;
                 QString srcMeta = orphan.originPath + QLatin1Char('/')
-                                  + orphan.filename.chopped(4) + QStringLiteral(".meta");
+                                  + backupStem(orphan.filename) + QStringLiteral(".meta");
                 QString destBak = destDir + QLatin1Char('/') + orphan.filename;
                 QString destMeta = destDir + QLatin1Char('/')
-                                   + orphan.filename.chopped(4) + QStringLiteral(".meta");
+                                   + backupStem(orphan.filename) + QStringLiteral(".meta");
 
                 // Skip duplicates
                 if (QFile::exists(destBak)) {

@@ -1,4 +1,5 @@
 #include "windowsonedrivebackend.h"
+#include "backupvalidation.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -192,7 +193,7 @@ void WindowsOneDriveBackend::writeBackup(const QString &filename, const QByteArr
     QPointer<WindowsOneDriveBackend> self(this);
     (void)QtConcurrent::run([self, dir, filename, data, meta] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+        QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
         // Write .bak file atomically
         {
@@ -251,7 +252,7 @@ void WindowsOneDriveBackend::readBackup(const QString &filename)
     QPointer<WindowsOneDriveBackend> self(this);
     (void)QtConcurrent::run([self, dir, filename] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+        QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
         // Emit indeterminate progress — QFile::open() may block during hydration
         QMetaObject::invokeMethod(qApp, [self, filename] {
@@ -289,10 +290,11 @@ void WindowsOneDriveBackend::deleteBackup(const QString &filename)
     QPointer<WindowsOneDriveBackend> self(this);
     (void)QtConcurrent::run([self, dir, filename] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+        QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
         bool ok = QFile::remove(bakPath);
-        QFile::remove(metaPath); // Best effort
+        if (!QFile::remove(metaPath) && QFile::exists(metaPath))
+            qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
 
         QMetaObject::invokeMethod(qApp, [self, filename, ok] {
             if (!self) return;
@@ -312,7 +314,7 @@ void WindowsOneDriveBackend::scanBackups()
                                           QDir::Files, QDir::Name);
 
         static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
         QList<BackupInfo> backups;
         for (const QString &entry : entries) {
@@ -330,7 +332,7 @@ void WindowsOneDriveBackend::scanBackups()
             }
 
             // Try to read .meta sidecar (bounded)
-            QString metaPath = dir + QLatin1Char('/') + entry.chopped(4) + QStringLiteral(".meta");
+            QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
                 QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
@@ -435,7 +437,7 @@ void WindowsOneDriveBackend::scanOrphanedBackups()
             dirsToScan.append({fallback, QtCloudBackup::StorageType::LocalDirectory});
 
         static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_(.+)_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
         QList<OrphanedBackupInfo> orphans;
         for (const auto &[scanDir, storType] : dirsToScan) {
@@ -451,7 +453,7 @@ void WindowsOneDriveBackend::scanOrphanedBackups()
                 info.originStorageType = storType;
                 info.originPath = scanDir;
 
-                QString metaPath = scanDir + QLatin1Char('/') + entry.chopped(4)
+                QString metaPath = scanDir + QLatin1Char('/') + backupStem(entry)
                                    + QStringLiteral(".meta");
                 QFile metaFile(metaPath);
                 if (metaFile.open(QIODevice::ReadOnly)) {
@@ -496,10 +498,10 @@ void WindowsOneDriveBackend::migrateOrphanedBackups(const QList<OrphanedBackupIn
             const auto &orphan = orphans[i];
             QString srcBak = orphan.originPath + QLatin1Char('/') + orphan.filename;
             QString srcMeta = orphan.originPath + QLatin1Char('/')
-                              + orphan.filename.chopped(4) + QStringLiteral(".meta");
+                              + backupStem(orphan.filename) + QStringLiteral(".meta");
             QString destBak = destDir + QLatin1Char('/') + orphan.filename;
             QString destMeta = destDir + QLatin1Char('/')
-                               + orphan.filename.chopped(4) + QStringLiteral(".meta");
+                               + backupStem(orphan.filename) + QStringLiteral(".meta");
 
             // Skip duplicates
             if (QFile::exists(destBak)) {
