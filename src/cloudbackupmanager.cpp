@@ -1,5 +1,6 @@
 #include "cloudbackupmanager.h"
 #include "cloudbackupbackend.h"
+#include "backupvalidation.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -203,12 +204,22 @@ void CloudBackupManager::listBackups()
 
 void CloudBackupManager::requestDownload(const QString &filename)
 {
+    if (!isValidBackupFilename(filename)) {
+        emit downloadUpdated(filename, QtCloudBackup::DownloadStatus::DownloadFailed,
+                             tr("Invalid backup filename"));
+        return;
+    }
     emit downloadUpdated(filename, QtCloudBackup::DownloadStatus::DownloadInProgress, {});
     m_backend->triggerDownload(filename);
 }
 
 void CloudBackupManager::restoreBackup(const QString &filename)
 {
+    if (!isValidBackupFilename(filename)) {
+        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
+                            tr("Invalid backup filename"));
+        return;
+    }
     if (m_backupInProgress)
         return;
 
@@ -221,6 +232,10 @@ void CloudBackupManager::restoreBackup(const QString &filename)
 
 void CloudBackupManager::deleteBackup(const QString &filename)
 {
+    if (!isValidBackupFilename(filename)) {
+        emit deleteFailed(filename, tr("Invalid backup filename"));
+        return;
+    }
     m_backend->deleteBackup(filename);
 }
 
