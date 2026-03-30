@@ -2,11 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 set(QTCLOUDBACKUP_LIB_VERSION 0.2.1)
 
-if(APPLE)
-    project(QtCloudBackup VERSION ${QTCLOUDBACKUP_LIB_VERSION} LANGUAGES CXX OBJCXX)
-else()
-    project(QtCloudBackup VERSION ${QTCLOUDBACKUP_LIB_VERSION} LANGUAGES CXX)
-endif()
+project(QtCloudBackup VERSION ${QTCLOUDBACKUP_LIB_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,6 +28,11 @@ if(APPLE)
     list(APPEND SOURCES
         src/platform/apple/appleicloudbackend.h
         src/platform/apple/appleicloudbackend.mm
+    )
+    set_source_files_properties(
+        src/platform/apple/appleicloudbackend.mm
+        PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc"
     )
 elseif(WIN32)
     list(APPEND SOURCES
