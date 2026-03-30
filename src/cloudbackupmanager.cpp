@@ -163,7 +163,9 @@ void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray 
     // Sanitize sourceId
     QString sanitized;
     for (const QChar &c : sourceId) {
-        if (c.isLetterOrNumber() || c == QLatin1Char('-') || c == QLatin1Char('_'))
+        if ((c >= QLatin1Char('a') && c <= QLatin1Char('z'))
+            || (c >= QLatin1Char('A') && c <= QLatin1Char('Z'))
+            || c.isDigit() || c == QLatin1Char('-') || c == QLatin1Char('_'))
             sanitized.append(c);
     }
     if (sanitized.isEmpty()) {
