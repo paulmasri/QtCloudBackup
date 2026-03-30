@@ -1,4 +1,5 @@
 #include "localbackend.h"
+#include "backupvalidation.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -72,7 +73,7 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
     QPointer<LocalBackend> self(this);
     (void)QtConcurrent::run([self, dir, filename, data, meta] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+        QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
         // Write .bak file atomically
         {
@@ -131,7 +132,7 @@ void LocalBackend::readBackup(const QString &filename)
     QPointer<LocalBackend> self(this);
     (void)QtConcurrent::run([self, dir, filename] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+        QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
         QFile bakFile(bakPath);
         if (!bakFile.open(QIODevice::ReadOnly)) {
@@ -163,7 +164,7 @@ void LocalBackend::deleteBackup(const QString &filename)
     QPointer<LocalBackend> self(this);
     (void)QtConcurrent::run([self, dir, filename] {
         QString bakPath = dir + QLatin1Char('/') + filename;
-        QString metaPath = bakPath.chopped(4) + QStringLiteral(".meta");
+        QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
         bool ok = QFile::remove(bakPath);
         QFile::remove(metaPath); // Best effort
@@ -195,7 +196,7 @@ void LocalBackend::scanBackups()
             info.downloadState = QtCloudBackup::DownloadState::Local;
 
             // Try to read .meta sidecar (bounded)
-            QString metaPath = dir + QLatin1Char('/') + entry.chopped(4) + QStringLiteral(".meta");
+            QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
                 QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
