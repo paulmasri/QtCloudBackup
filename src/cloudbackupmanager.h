@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_CLOUDBACKUPMANAGER_H
-#define QTCLOUDBACKUP_CLOUDBACKUPMANAGER_H
+#pragma once
 
 #include "backupinfo.h"
 
@@ -52,26 +51,26 @@ signals:
 
     void statusChanged(QtCloudBackup::StorageStatus status, const QString &detail);
     void backupSucceeded(const QString &filename, const QDateTime &timestamp);
-    void backupFailed(const QString &reason);
+    void backupFailed(int error, const QString &message);
     void backupsListed(const QList<BackupInfo> &backups);
-    void backupsListFailed(const QString &reason);
+    void backupsListFailed(int error, const QString &message);
     void downloadProgressChanged(const QString &filename, qint64 bytesReceived, qint64 bytesTotal);
     void downloadUpdated(const QString &filename, QtCloudBackup::DownloadStatus status,
-                         const QString &reason);
+                         int error, const QString &message);
     void restoreUpdated(const QString &filename, QtCloudBackup::RestoreStatus status,
                         const QByteArray &data, const QVariantMap &metadata,
-                        const QString &reason);
+                        int error, const QString &message);
     void deleteSucceeded(const QString &filename);
-    void deleteFailed(const QString &filename, const QString &reason);
+    void deleteFailed(const QString &filename, int error, const QString &message);
     void remoteBackupDetected(const QString &sourceId);
     void orphanedBackupsDetected(const QVariantList &orphans);
     void migrationUpdated(QtCloudBackup::MigrationStatus status, int migratedCount,
-                          int totalCount, const QString &reason);
+                          int totalCount, int error, const QString &message);
 
 private:
     void pruneBackups(const QString &sourceId);
 
-    void handleReadFailed(const QString &filename, const QString &reason);
+    void handleReadFailed(const QString &filename, int error, const QString &message);
 
     std::unique_ptr<CloudBackupBackend> m_backend;
     bool m_backupInProgress = false;
@@ -81,5 +80,3 @@ private:
     QString m_pendingRestoreFilename; // set when auto-downloading for restore
     QList<OrphanedBackupInfo> m_orphanedBackups;
 };
-
-#endif // QTCLOUDBACKUP_CLOUDBACKUPMANAGER_H

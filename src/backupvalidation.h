@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_BACKUPVALIDATION_H
-#define QTCLOUDBACKUP_BACKUPVALIDATION_H
+#pragma once
 
 #include <QDir>
 #include <QRegularExpression>
@@ -25,5 +24,3 @@ inline QString backupStem(const QString &filename)
         return {};
     return filename.chopped(4);
 }
-
-#endif // QTCLOUDBACKUP_BACKUPVALIDATION_H

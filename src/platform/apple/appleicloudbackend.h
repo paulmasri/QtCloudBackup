@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_APPLEICLOUDBACKEND_H
-#define QTCLOUDBACKUP_APPLEICLOUDBACKEND_H
+#pragma once
 
 #include "../../cloudbackupbackend.h"
 
@@ -48,5 +47,3 @@ private:
     std::shared_ptr<AppleQueryGuard> m_queryGuard = std::make_shared<AppleQueryGuard>();
     void *m_notificationObserver = nullptr; // id for NSUbiquityIdentityDidChangeNotification
 };
-
-#endif // QTCLOUDBACKUP_APPLEICLOUDBACKEND_H

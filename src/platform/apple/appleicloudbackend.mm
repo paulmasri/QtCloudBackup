@@ -247,7 +247,8 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
             // Coordinated write for .bak
             NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
             __block bool success = true;
-            __block QString errorReason;
+            __block int errorCode = int(QtCloudBackup::BackupError::NoError);
+            __block QString errorMsg;
 
             NSError *coordError = nil;
             [coordinator coordinateWritingItemAtURL:bakUrl
@@ -259,22 +260,25 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
                 NSError *writeError = nil;
                 if (![nsData writeToURL:newURL options:NSDataWritingAtomic error:&writeError]) {
                     success = false;
-                    errorReason = AppleICloudBackend::tr("Failed to write backup file: %1")
+                    errorCode = int(QtCloudBackup::BackupError::IOError);
+                    errorMsg = AppleICloudBackend::tr("Failed to write backup file: %1")
                         .arg(QString::fromNSString(writeError.localizedDescription));
                 }
             }];
 
             if (coordError) {
                 success = false;
-                errorReason = AppleICloudBackend::tr("File coordination failed for backup: %1")
+                errorCode = int(QtCloudBackup::BackupError::CoordinationFailed);
+                errorMsg = AppleICloudBackend::tr("File coordination failed for backup: %1")
                     .arg(QString::fromNSString(coordError.localizedDescription));
             }
 
             if (!success) {
-                QString reason = errorReason;
-                QMetaObject::invokeMethod(qApp, [self, reason] {
+                int err = errorCode;
+                QString msg = errorMsg;
+                QMetaObject::invokeMethod(qApp, [self, filename, err, msg] {
                     if (!self) return;
-                    emit self->writeFailed(reason);
+                    emit self->writeCompleted(filename, err, msg);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -291,31 +295,35 @@ void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &
                 NSError *writeError = nil;
                 if (![nsData writeToURL:newURL options:NSDataWritingAtomic error:&writeError]) {
                     success = false;
-                    errorReason = AppleICloudBackend::tr("Failed to write metadata file: %1")
+                    errorCode = int(QtCloudBackup::BackupError::MetadataIOError);
+                    errorMsg = AppleICloudBackend::tr("Failed to write metadata file: %1")
                         .arg(QString::fromNSString(writeError.localizedDescription));
                 }
             }];
 
             if (metaCoordError) {
                 success = false;
-                errorReason = AppleICloudBackend::tr("File coordination failed for metadata: %1")
+                errorCode = int(QtCloudBackup::BackupError::CoordinationFailed);
+                errorMsg = AppleICloudBackend::tr("File coordination failed for metadata: %1")
                     .arg(QString::fromNSString(metaCoordError.localizedDescription));
             }
 
             if (!success) {
                 // Remove the .bak file since meta failed
                 [[NSFileManager defaultManager] removeItemAtURL:bakUrl error:nil];
-                QString reason = errorReason;
-                QMetaObject::invokeMethod(qApp, [self, reason] {
+                int err = errorCode;
+                QString msg = errorMsg;
+                QMetaObject::invokeMethod(qApp, [self, filename, err, msg] {
                     if (!self) return;
-                    emit self->writeFailed(reason);
+                    emit self->writeCompleted(filename, err, msg);
                 }, Qt::QueuedConnection);
                 return;
             }
 
             QMetaObject::invokeMethod(qApp, [self, filename] {
                 if (!self) return;
-                emit self->writeSucceeded(filename);
+                emit self->writeCompleted(filename,
+                    int(QtCloudBackup::BackupError::NoError), QString());
             }, Qt::QueuedConnection);
         }
     });
@@ -344,17 +352,19 @@ void AppleICloudBackend::readBackup(const QString &filename)
                                                                              error:&dlError];
                 if (dlError) {
                     QMetaObject::invokeMethod(qApp, [self, filename,
-                            reason = AppleICloudBackend::tr("Failed to start download: %1")
+                            msg = AppleICloudBackend::tr("Failed to start download: %1")
                                 .arg(QString::fromNSString(dlError.localizedDescription))] {
                         if (!self) return;
-                        emit self->readFailed(filename, reason);
+                        emit self->readCompleted(filename, {}, {},
+                            int(QtCloudBackup::BackupError::DownloadFailed), msg);
                     }, Qt::QueuedConnection);
                 } else {
                     QMetaObject::invokeMethod(qApp, [self, filename,
-                            reason = AppleICloudBackend::tr(
+                            msg = AppleICloudBackend::tr(
                                 "File is cloud-only — download triggered, retry after downloadReady")] {
                         if (!self) return;
-                        emit self->readFailed(filename, reason);
+                        emit self->readCompleted(filename, {}, {},
+                            int(QtCloudBackup::BackupError::FileNotLocal), msg);
                     }, Qt::QueuedConnection);
                 }
                 return;
@@ -364,7 +374,8 @@ void AppleICloudBackend::readBackup(const QString &filename)
             NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
             __block QByteArray data;
             __block bool success = true;
-            __block QString errorReason;
+            __block int errorCode = int(QtCloudBackup::BackupError::NoError);
+            __block QString errorMsg;
 
             NSError *coordError = nil;
             [coordinator coordinateReadingItemAtURL:bakUrl
@@ -377,21 +388,24 @@ void AppleICloudBackend::readBackup(const QString &filename)
                                      static_cast<qsizetype>(nsData.length));
                 } else {
                     success = false;
-                    errorReason = AppleICloudBackend::tr("Failed to read backup file");
+                    errorCode = int(QtCloudBackup::BackupError::IOError);
+                    errorMsg = AppleICloudBackend::tr("Failed to read backup file");
                 }
             }];
 
             if (coordError) {
                 success = false;
-                errorReason = AppleICloudBackend::tr("File coordination failed for read: %1")
+                errorCode = int(QtCloudBackup::BackupError::CoordinationFailed);
+                errorMsg = AppleICloudBackend::tr("File coordination failed for read: %1")
                     .arg(QString::fromNSString(coordError.localizedDescription));
             }
 
             if (!success) {
-                QString reason = errorReason;
-                QMetaObject::invokeMethod(qApp, [self, filename, reason] {
+                int err = errorCode;
+                QString msg = errorMsg;
+                QMetaObject::invokeMethod(qApp, [self, filename, err, msg] {
                     if (!self) return;
-                    emit self->readFailed(filename, reason);
+                    emit self->readCompleted(filename, {}, {}, err, msg);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -409,7 +423,8 @@ void AppleICloudBackend::readBackup(const QString &filename)
             QByteArray readData = data;
             QMetaObject::invokeMethod(qApp, [self, filename, readData, meta] {
                 if (!self) return;
-                emit self->readSucceeded(filename, readData, meta);
+                emit self->readCompleted(filename, readData, meta,
+                    int(QtCloudBackup::BackupError::NoError), QString());
             }, Qt::QueuedConnection);
         }
     });
@@ -429,7 +444,8 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
 
             NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
             __block bool success = true;
-            __block QString errorReason;
+            __block int errorCode = int(QtCloudBackup::BackupError::NoError);
+            __block QString errorMsg;
 
             NSError *coordError = nil;
             [coordinator coordinateWritingItemAtURL:bakUrl
@@ -439,14 +455,16 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
                 NSError *removeError = nil;
                 if (![[NSFileManager defaultManager] removeItemAtURL:newURL error:&removeError]) {
                     success = false;
-                    errorReason = AppleICloudBackend::tr("Failed to delete backup file: %1")
+                    errorCode = int(QtCloudBackup::BackupError::IOError);
+                    errorMsg = AppleICloudBackend::tr("Failed to delete backup file: %1")
                         .arg(QString::fromNSString(removeError.localizedDescription));
                 }
             }];
 
             if (coordError) {
                 success = false;
-                errorReason = AppleICloudBackend::tr("File coordination failed for delete: %1")
+                errorCode = int(QtCloudBackup::BackupError::CoordinationFailed);
+                errorMsg = AppleICloudBackend::tr("File coordination failed for delete: %1")
                     .arg(QString::fromNSString(coordError.localizedDescription));
             }
 
@@ -465,11 +483,11 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
                 [version removeAndReturnError:nil];
             }
 
-            bool deleteOk = success;
-            QString reason = errorReason;
-            QMetaObject::invokeMethod(qApp, [self, filename, deleteOk, reason] {
+            int err = errorCode;
+            QString msg = errorMsg;
+            QMetaObject::invokeMethod(qApp, [self, filename, err, msg] {
                 if (!self) return;
-                emit self->deleteCompleted(filename, deleteOk, reason);
+                emit self->deleteCompleted(filename, err, msg);
             }, Qt::QueuedConnection);
         }
     });
@@ -606,13 +624,14 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
             NSError *error = nil;
             if (![[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:fileUrl
                                                                                error:&error]) {
-                QString reason = error
+                QString msg = error
                     ? AppleICloudBackend::tr("Failed to start download: %1")
                           .arg(QString::fromNSString(error.localizedDescription))
                     : AppleICloudBackend::tr("Failed to start download");
-                QMetaObject::invokeMethod(qApp, [self, filename, reason] {
+                QMetaObject::invokeMethod(qApp, [self, filename, msg] {
                     if (!self) return;
-                    emit self->downloadCompleted(filename, false, reason);
+                    emit self->downloadCompleted(filename,
+                        int(QtCloudBackup::BackupError::DownloadFailed), msg);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -682,13 +701,15 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
             if (downloaded) {
                 QMetaObject::invokeMethod(qApp, [self, filename] {
                     if (!self) return;
-                    emit self->downloadCompleted(filename, true, QString());
+                    emit self->downloadCompleted(filename,
+                        int(QtCloudBackup::BackupError::NoError), QString());
                 }, Qt::QueuedConnection);
             } else {
                 QMetaObject::invokeMethod(qApp, [self, filename,
-                        reason = AppleICloudBackend::tr("Download timed out")] {
+                        msg = AppleICloudBackend::tr("Download timed out")] {
                     if (!self) return;
-                    emit self->downloadCompleted(filename, false, reason);
+                    emit self->downloadCompleted(filename,
+                        int(QtCloudBackup::BackupError::DownloadTimeout), msg);
                 }, Qt::QueuedConnection);
             }
         }
@@ -846,13 +867,14 @@ void AppleICloudBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> 
                 }, Qt::QueuedConnection);
             }
 
-            bool success = allSucceeded;
             int count = migrated;
-            QString reason = allSucceeded ? QString()
+            int err = allSucceeded ? int(QtCloudBackup::BackupError::NoError)
+                                   : int(QtCloudBackup::BackupError::MigrationPartial);
+            QString msg = allSucceeded ? QString()
                 : AppleICloudBackend::tr("Some files could not be migrated");
-            QMetaObject::invokeMethod(qApp, [self, success, count, reason] {
+            QMetaObject::invokeMethod(qApp, [self, count, err, msg] {
                 if (!self) return;
-                emit self->migrationCompleted(success, count, reason);
+                emit self->migrationCompleted(count, err, msg);
             }, Qt::QueuedConnection);
         }
     });

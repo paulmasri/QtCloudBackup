@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_CLOUDBACKUPBACKEND_H
-#define QTCLOUDBACKUP_CLOUDBACKUPBACKEND_H
+#pragma once
 
 #include "backupinfo.h"
 
@@ -28,18 +27,15 @@ public:
 
 signals:
     void statusChanged(QtCloudBackup::StorageStatus status, const QString &detail);
-    void writeSucceeded(const QString &filename);
-    void writeFailed(const QString &reason);
-    void readSucceeded(const QString &filename, const QByteArray &data, const QJsonObject &meta);
-    void readFailed(const QString &filename, const QString &reason);
-    void deleteCompleted(const QString &filename, bool success, const QString &reason);
+    void writeCompleted(const QString &filename, int error, const QString &message);
+    void readCompleted(const QString &filename, const QByteArray &data, const QJsonObject &meta,
+                       int error, const QString &message);
+    void deleteCompleted(const QString &filename, int error, const QString &message);
     void scanCompleted(const QList<BackupInfo> &backups);
     void downloadProgress(const QString &filename, qint64 received, qint64 total);
-    void downloadCompleted(const QString &filename, bool success, const QString &reason);
+    void downloadCompleted(const QString &filename, int error, const QString &message);
     void remoteChangeDetected(const QString &sourceId);
     void orphanScanCompleted(const QList<OrphanedBackupInfo> &orphans);
     void migrationProgress(int completed, int total);
-    void migrationCompleted(bool success, int migratedCount, const QString &reason);
+    void migrationCompleted(int migratedCount, int error, const QString &message);
 };
-
-#endif // QTCLOUDBACKUP_CLOUDBACKUPBACKEND_H

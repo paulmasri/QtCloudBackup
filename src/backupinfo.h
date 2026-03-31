@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_BACKUPINFO_H
-#define QTCLOUDBACKUP_BACKUPINFO_H
+#pragma once
 
 #include <QDateTime>
 #include <QObject>
@@ -59,6 +58,20 @@ enum class MigrationStatus {
 };
 Q_ENUM_NS(MigrationStatus)
 
+enum class BackupError {
+    NoError,
+    InvalidArgument,
+    IOError,
+    MetadataIOError,
+    CoordinationFailed,
+    FileNotLocal,
+    DownloadFailed,
+    DownloadTimeout,
+    MigrationPartial,
+    UnknownError
+};
+Q_ENUM_NS(BackupError)
+
 } // namespace QtCloudBackup
 
 class OrphanedBackupInfo {
@@ -98,5 +111,3 @@ public:
 };
 
 Q_DECLARE_METATYPE(BackupInfo)
-
-#endif // QTCLOUDBACKUP_BACKUPINFO_H
