@@ -21,68 +21,67 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
                 emit statusChanged(status, detail);
             });
 
-    connect(m_backend.get(), &CloudBackupBackend::writeSucceeded, this,
-            [this](const QString &filename) {
+    connect(m_backend.get(), &CloudBackupBackend::writeCompleted, this,
+            [this](const QString &filename, int error, const QString &message) {
                 m_backupInProgress = false;
                 emit backupInProgressChanged();
-                emit backupSucceeded(filename, m_currentBackupTimestamp);
-                pruneBackups(m_currentBackupSourceId);
-            });
-
-    connect(m_backend.get(), &CloudBackupBackend::writeFailed, this,
-            [this](const QString &reason) {
-                m_backupInProgress = false;
-                emit backupInProgressChanged();
-                emit backupFailed(reason);
+                if (error == int(QtCloudBackup::BackupError::NoError)) {
+                    emit backupSucceeded(filename, m_currentBackupTimestamp);
+                    pruneBackups(m_currentBackupSourceId);
+                } else {
+                    emit backupFailed(error, message);
+                }
             });
 
     connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
             &CloudBackupManager::backupsListed);
 
-    connect(m_backend.get(), &CloudBackupBackend::readSucceeded, this,
-            [this](const QString &filename, const QByteArray &data, const QJsonObject &meta) {
-                m_pendingRestoreFilename.clear();
-                m_backupInProgress = false;
-                emit backupInProgressChanged();
-                emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreSucceeded,
-                                    data, meta.toVariantMap(), {});
-            });
-
-    connect(m_backend.get(), &CloudBackupBackend::readFailed, this,
-            [this](const QString &filename, const QString &reason) {
-                handleReadFailed(filename, reason);
+    connect(m_backend.get(), &CloudBackupBackend::readCompleted, this,
+            [this](const QString &filename, const QByteArray &data, const QJsonObject &meta,
+                   int error, const QString &message) {
+                if (error == int(QtCloudBackup::BackupError::NoError)) {
+                    m_pendingRestoreFilename.clear();
+                    m_backupInProgress = false;
+                    emit backupInProgressChanged();
+                    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreSucceeded,
+                                        data, meta.toVariantMap(),
+                                        int(QtCloudBackup::BackupError::NoError), QString());
+                } else {
+                    handleReadFailed(filename, error, message);
+                }
             });
 
     connect(m_backend.get(), &CloudBackupBackend::deleteCompleted, this,
-            [this](const QString &filename, bool success, const QString &reason) {
-                if (success)
+            [this](const QString &filename, int error, const QString &message) {
+                if (error == int(QtCloudBackup::BackupError::NoError))
                     emit deleteSucceeded(filename);
                 else
-                    emit deleteFailed(filename, reason);
+                    emit deleteFailed(filename, error, message);
             });
 
     connect(m_backend.get(), &CloudBackupBackend::downloadProgress, this,
             &CloudBackupManager::downloadProgressChanged);
 
     connect(m_backend.get(), &CloudBackupBackend::downloadCompleted, this,
-            [this](const QString &filename, bool success, const QString &reason) {
+            [this](const QString &filename, int error, const QString &message) {
+                bool success = (error == int(QtCloudBackup::BackupError::NoError));
                 if (!m_pendingRestoreFilename.isEmpty() && filename == m_pendingRestoreFilename) {
                     if (success) {
                         // Auto-retry the restore
                         emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreInProgress,
-                                            {}, {}, {});
+                                            {}, {}, int(QtCloudBackup::BackupError::NoError), QString());
                         m_backend->readBackup(filename);
                     } else {
                         m_pendingRestoreFilename.clear();
                         m_backupInProgress = false;
                         emit backupInProgressChanged();
                         emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed,
-                                            {}, {}, reason);
+                                            {}, {}, error, message);
                     }
                 } else {
                     auto status = success ? QtCloudBackup::DownloadStatus::DownloadSucceeded
                                           : QtCloudBackup::DownloadStatus::DownloadFailed;
-                    emit downloadUpdated(filename, status, reason);
+                    emit downloadUpdated(filename, status, error, message);
                 }
             });
 
@@ -103,17 +102,19 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     connect(m_backend.get(), &CloudBackupBackend::migrationProgress, this,
             [this](int completed, int total) {
                 emit migrationUpdated(QtCloudBackup::MigrationStatus::MigrationInProgress,
-                                      completed, total, {});
+                                      completed, total,
+                                      int(QtCloudBackup::BackupError::NoError), QString());
             });
 
     connect(m_backend.get(), &CloudBackupBackend::migrationCompleted, this,
-            [this](bool success, int migratedCount, const QString &reason) {
-                auto status = success ? QtCloudBackup::MigrationStatus::MigrationSucceeded
-                                      : QtCloudBackup::MigrationStatus::MigrationFailed;
+            [this](int migratedCount, int error, const QString &message) {
+                auto status = (error == int(QtCloudBackup::BackupError::NoError))
+                    ? QtCloudBackup::MigrationStatus::MigrationSucceeded
+                    : QtCloudBackup::MigrationStatus::MigrationFailed;
                 int total = m_orphanedBackups.size();
                 m_orphanedBackups.clear();
                 emit hasOrphanedBackupsChanged();
-                emit migrationUpdated(status, migratedCount, total, reason);
+                emit migrationUpdated(status, migratedCount, total, error, message);
             });
 
     m_backend->initialise();
@@ -169,7 +170,8 @@ void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray 
             sanitized.append(c);
     }
     if (sanitized.isEmpty()) {
-        emit backupFailed(tr("Source ID is empty after sanitization"));
+        emit backupFailed(int(QtCloudBackup::BackupError::InvalidArgument),
+                          tr("Source ID is empty after sanitization"));
         return;
     }
     if (sanitized.length() > 64) {
@@ -208,10 +210,12 @@ void CloudBackupManager::requestDownload(const QString &filename)
 {
     if (!isValidBackupFilename(filename)) {
         emit downloadUpdated(filename, QtCloudBackup::DownloadStatus::DownloadFailed,
+                             int(QtCloudBackup::BackupError::InvalidArgument),
                              tr("Invalid backup filename"));
         return;
     }
-    emit downloadUpdated(filename, QtCloudBackup::DownloadStatus::DownloadInProgress, {});
+    emit downloadUpdated(filename, QtCloudBackup::DownloadStatus::DownloadInProgress,
+                         int(QtCloudBackup::BackupError::NoError), QString());
     m_backend->triggerDownload(filename);
 }
 
@@ -219,6 +223,7 @@ void CloudBackupManager::restoreBackup(const QString &filename)
 {
     if (!isValidBackupFilename(filename)) {
         emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
+                            int(QtCloudBackup::BackupError::InvalidArgument),
                             tr("Invalid backup filename"));
         return;
     }
@@ -228,14 +233,16 @@ void CloudBackupManager::restoreBackup(const QString &filename)
     m_pendingRestoreFilename.clear();
     m_backupInProgress = true;
     emit backupInProgressChanged();
-    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreInProgress, {}, {}, {});
+    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreInProgress, {}, {},
+                        int(QtCloudBackup::BackupError::NoError), QString());
     m_backend->readBackup(filename);
 }
 
 void CloudBackupManager::deleteBackup(const QString &filename)
 {
     if (!isValidBackupFilename(filename)) {
-        emit deleteFailed(filename, tr("Invalid backup filename"));
+        emit deleteFailed(filename, int(QtCloudBackup::BackupError::InvalidArgument),
+                          tr("Invalid backup filename"));
         return;
     }
     m_backend->deleteBackup(filename);
@@ -261,18 +268,21 @@ void CloudBackupManager::migrateOrphanedBackups()
     if (m_orphanedBackups.isEmpty())
         return;
     emit migrationUpdated(QtCloudBackup::MigrationStatus::MigrationInProgress,
-                          0, m_orphanedBackups.size(), {});
+                          0, m_orphanedBackups.size(),
+                          int(QtCloudBackup::BackupError::NoError), QString());
     m_backend->migrateOrphanedBackups(m_orphanedBackups);
 }
 
-void CloudBackupManager::handleReadFailed(const QString &filename, const QString &reason)
+void CloudBackupManager::handleReadFailed(const QString &filename, int error,
+                                           const QString &message)
 {
     // If the file is cloud-only and we haven't already tried downloading,
     // auto-trigger the download and retry on completion.
     if (m_pendingRestoreFilename.isEmpty()
-        && reason.contains(QStringLiteral("cloud-only"))) {
+        && error == int(QtCloudBackup::BackupError::FileNotLocal)) {
         m_pendingRestoreFilename = filename;
-        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreDownloading, {}, {}, {});
+        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreDownloading, {}, {},
+                            int(QtCloudBackup::BackupError::NoError), QString());
         m_backend->triggerDownload(filename);
         return;
     }
@@ -281,7 +291,8 @@ void CloudBackupManager::handleReadFailed(const QString &filename, const QString
     m_pendingRestoreFilename.clear();
     m_backupInProgress = false;
     emit backupInProgressChanged();
-    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {}, reason);
+    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
+                        error, message);
 }
 
 void CloudBackupManager::pruneBackups(const QString &sourceId)

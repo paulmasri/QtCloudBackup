@@ -79,19 +79,21 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
         {
             QSaveFile file(bakPath);
             if (!file.open(QIODevice::WriteOnly)) {
-                QMetaObject::invokeMethod(qApp, [self,
-                        reason = LocalBackend::tr("Failed to open backup file for writing")] {
+                QMetaObject::invokeMethod(qApp, [self, filename,
+                        msg = LocalBackend::tr("Failed to open backup file for writing")] {
                     if (!self) return;
-                    emit self->writeFailed(reason);
+                    emit self->writeCompleted(filename,
+                        int(QtCloudBackup::BackupError::IOError), msg);
                 }, Qt::QueuedConnection);
                 return;
             }
             file.write(data);
             if (!file.commit()) {
-                QMetaObject::invokeMethod(qApp, [self,
-                        reason = LocalBackend::tr("Failed to write backup file")] {
+                QMetaObject::invokeMethod(qApp, [self, filename,
+                        msg = LocalBackend::tr("Failed to write backup file")] {
                     if (!self) return;
-                    emit self->writeFailed(reason);
+                    emit self->writeCompleted(filename,
+                        int(QtCloudBackup::BackupError::IOError), msg);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -101,19 +103,21 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
         {
             QSaveFile file(metaPath);
             if (!file.open(QIODevice::WriteOnly)) {
-                QMetaObject::invokeMethod(qApp, [self,
-                        reason = LocalBackend::tr("Failed to open metadata file for writing")] {
+                QMetaObject::invokeMethod(qApp, [self, filename,
+                        msg = LocalBackend::tr("Failed to open metadata file for writing")] {
                     if (!self) return;
-                    emit self->writeFailed(reason);
+                    emit self->writeCompleted(filename,
+                        int(QtCloudBackup::BackupError::MetadataIOError), msg);
                 }, Qt::QueuedConnection);
                 return;
             }
             file.write(QJsonDocument(meta).toJson(QJsonDocument::Compact));
             if (!file.commit()) {
-                QMetaObject::invokeMethod(qApp, [self,
-                        reason = LocalBackend::tr("Failed to write metadata file")] {
+                QMetaObject::invokeMethod(qApp, [self, filename,
+                        msg = LocalBackend::tr("Failed to write metadata file")] {
                     if (!self) return;
-                    emit self->writeFailed(reason);
+                    emit self->writeCompleted(filename,
+                        int(QtCloudBackup::BackupError::MetadataIOError), msg);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -121,7 +125,8 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
 
         QMetaObject::invokeMethod(qApp, [self, filename] {
             if (!self) return;
-            emit self->writeSucceeded(filename);
+            emit self->writeCompleted(filename,
+                int(QtCloudBackup::BackupError::NoError), QString());
         }, Qt::QueuedConnection);
     });
 }
@@ -137,9 +142,10 @@ void LocalBackend::readBackup(const QString &filename)
         QFile bakFile(bakPath);
         if (!bakFile.open(QIODevice::ReadOnly)) {
             QMetaObject::invokeMethod(qApp, [self, filename,
-                    reason = LocalBackend::tr("Failed to open backup file for reading")] {
+                    msg = LocalBackend::tr("Failed to open backup file for reading")] {
                 if (!self) return;
-                emit self->readFailed(filename, reason);
+                emit self->readCompleted(filename, {}, {},
+                    int(QtCloudBackup::BackupError::IOError), msg);
             }, Qt::QueuedConnection);
             return;
         }
@@ -153,7 +159,8 @@ void LocalBackend::readBackup(const QString &filename)
 
         QMetaObject::invokeMethod(qApp, [self, filename, data, meta] {
             if (!self) return;
-            emit self->readSucceeded(filename, data, meta);
+            emit self->readCompleted(filename, data, meta,
+                int(QtCloudBackup::BackupError::NoError), QString());
         }, Qt::QueuedConnection);
     });
 }
@@ -170,10 +177,12 @@ void LocalBackend::deleteBackup(const QString &filename)
         if (!QFile::remove(metaPath) && QFile::exists(metaPath))
             qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
 
-        QMetaObject::invokeMethod(qApp, [self, filename, ok] {
+        int err = ok ? int(QtCloudBackup::BackupError::NoError)
+                     : int(QtCloudBackup::BackupError::IOError);
+        QString msg = ok ? QString() : LocalBackend::tr("Failed to delete backup file");
+        QMetaObject::invokeMethod(qApp, [self, filename, err, msg] {
             if (!self) return;
-            emit self->deleteCompleted(filename, ok,
-                                 ok ? QString() : LocalBackend::tr("Failed to delete backup file"));
+            emit self->deleteCompleted(filename, err, msg);
         }, Qt::QueuedConnection);
     });
 }
@@ -232,7 +241,8 @@ void LocalBackend::triggerDownload(const QString &filename)
 {
     // Local files are always available — emit success immediately
     QMetaObject::invokeMethod(this, [this, filename] {
-        emit downloadCompleted(filename, true, QString());
+        emit downloadCompleted(filename,
+            int(QtCloudBackup::BackupError::NoError), QString());
     }, Qt::QueuedConnection);
 }
 
@@ -245,5 +255,5 @@ void LocalBackend::scanOrphanedBackups()
 void LocalBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> &)
 {
     // Nothing to migrate
-    emit migrationCompleted(true, 0, {});
+    emit migrationCompleted(0, int(QtCloudBackup::BackupError::NoError), QString());
 }
