@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_WINDOWSONEDRIVEBACKEND_H
-#define QTCLOUDBACKUP_WINDOWSONEDRIVEBACKEND_H
+#pragma once
 
 #include "../../cloudbackupbackend.h"
 
@@ -30,5 +29,3 @@ private:
     QString m_statusDetail;
     QtCloudBackup::StorageType m_storageType = QtCloudBackup::StorageType::None;
 };
-
-#endif // QTCLOUDBACKUP_WINDOWSONEDRIVEBACKEND_H

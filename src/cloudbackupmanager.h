@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_CLOUDBACKUPMANAGER_H
-#define QTCLOUDBACKUP_CLOUDBACKUPMANAGER_H
+#pragma once
 
 #include "backupinfo.h"
 
@@ -81,5 +80,3 @@ private:
     QString m_pendingRestoreFilename; // set when auto-downloading for restore
     QList<OrphanedBackupInfo> m_orphanedBackups;
 };
-
-#endif // QTCLOUDBACKUP_CLOUDBACKUPMANAGER_H

@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_BACKUPINFO_H
-#define QTCLOUDBACKUP_BACKUPINFO_H
+#pragma once
 
 #include <QDateTime>
 #include <QObject>
@@ -112,5 +111,3 @@ public:
 };
 
 Q_DECLARE_METATYPE(BackupInfo)
-
-#endif // QTCLOUDBACKUP_BACKUPINFO_H

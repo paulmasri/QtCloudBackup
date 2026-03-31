@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_LOCALBACKEND_H
-#define QTCLOUDBACKUP_LOCALBACKEND_H
+#pragma once
 
 #include "../../cloudbackupbackend.h"
 
@@ -27,5 +26,3 @@ private:
     QtCloudBackup::StorageStatus m_status = QtCloudBackup::StorageStatus::Unknown;
     QString m_statusDetail;
 };
-
-#endif // QTCLOUDBACKUP_LOCALBACKEND_H

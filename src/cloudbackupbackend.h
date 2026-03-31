@@ -1,5 +1,4 @@
-#ifndef QTCLOUDBACKUP_CLOUDBACKUPBACKEND_H
-#define QTCLOUDBACKUP_CLOUDBACKUPBACKEND_H
+#pragma once
 
 #include "backupinfo.h"
 
@@ -40,5 +39,3 @@ signals:
     void migrationProgress(int completed, int total);
     void migrationCompleted(int migratedCount, int error, const QString &message);
 };
-
-#endif // QTCLOUDBACKUP_CLOUDBACKUPBACKEND_H
