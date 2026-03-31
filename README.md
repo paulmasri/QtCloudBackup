@@ -154,15 +154,15 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 |--------|-------------|
 | `statusChanged(status, detail)` | Storage status changed |
 | `backupSucceeded(filename, timestamp)` | Backup created |
-| `backupFailed(reason)` | Backup creation failed |
+| `backupFailed(error, message)` | Backup creation failed (see BackupError enum) |
 | `backupsListed(backups)` | Scan complete; `backups` is a `QList<BackupInfo>` |
-| `restoreUpdated(filename, status, data, metadata, reason)` | Restore status update (see RestoreStatus enum) |
-| `downloadUpdated(filename, status, reason)` | Download status update (see DownloadStatus enum) |
+| `restoreUpdated(filename, status, data, metadata, error, message)` | Restore status update (see RestoreStatus, BackupError enums) |
+| `downloadUpdated(filename, status, error, message)` | Download status update (see DownloadStatus, BackupError enums) |
 | `downloadProgressChanged(filename, bytesReceived, bytesTotal)` | Download progress (`bytesTotal == -1` means indeterminate) |
-| `deleteSucceeded(filename)` / `deleteFailed(filename, reason)` | Delete result |
+| `deleteSucceeded(filename)` / `deleteFailed(filename, error, message)` | Delete result (see BackupError enum) |
 | `remoteBackupDetected(sourceId)` | A new backup appeared from another device |
 | `orphanedBackupsDetected(orphans)` | Orphan scan complete; `orphans` is a `QVariantList` of `OrphanedBackupInfo` |
-| `migrationUpdated(status, migratedCount, totalCount, reason)` | Migration progress/result (see MigrationStatus enum) |
+| `migrationUpdated(status, migratedCount, totalCount, error, message)` | Migration progress/result (see MigrationStatus, BackupError enums) |
 
 ### Enums
 
@@ -177,6 +177,8 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 **DownloadStatus**: `DownloadInProgress`, `DownloadSucceeded`, `DownloadFailed`
 
 **MigrationStatus**: `MigrationInProgress`, `MigrationSucceeded`, `MigrationFailed`
+
+**BackupError**: `NoError`, `InvalidArgument`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadFailed`, `DownloadTimeout`, `MigrationPartial`, `UnknownError`
 
 ## QML usage example
 
@@ -195,7 +197,7 @@ Item {
         onBackupSucceeded: (filename, timestamp) => {
             console.log("Backup created:", filename)
         }
-        onRestoreUpdated: (filename, status, data, metadata, reason) => {
+        onRestoreUpdated: (filename, status, data, metadata, error, message) => {
             switch (status) {
             case CloudBackup.RestoreDownloading:
                 console.log("Downloading from cloud...")
@@ -208,7 +210,7 @@ Item {
                 // Use data and metadata here
                 break
             case CloudBackup.RestoreFailed:
-                console.log("Restore failed:", reason)
+                console.log("Restore failed:", error, message)
                 break
             }
         }
@@ -246,11 +248,11 @@ connect(manager, &CloudBackupManager::backupSucceeded,
 connect(manager, &CloudBackupManager::restoreUpdated,
         this, [](const QString &filename, QtCloudBackup::RestoreStatus status,
                  const QByteArray &data, const QVariantMap &metadata,
-                 const QString &reason) {
+                 int error, const QString &message) {
     if (status == QtCloudBackup::RestoreStatus::RestoreSucceeded)
         qDebug() << "Restored" << data.size() << "bytes";
     else if (status == QtCloudBackup::RestoreStatus::RestoreFailed)
-        qDebug() << "Restore failed:" << reason;
+        qDebug() << "Restore failed:" << error << message;
 });
 
 // Create a backup
@@ -291,11 +293,11 @@ CloudBackupManager {
         if (orphans.length > 0)
             migrationDialog.open()  // Let the user decide
     }
-    onMigrationUpdated: (status, migratedCount, totalCount, reason) => {
+    onMigrationUpdated: (status, migratedCount, totalCount, error, message) => {
         if (status === CloudBackup.MigrationSucceeded)
             console.log("Migrated", migratedCount, "backups")
         else if (status === CloudBackup.MigrationFailed)
-            console.log("Migration failed:", reason)
+            console.log("Migration failed:", error, message)
     }
 }
 
@@ -319,7 +321,7 @@ connect(manager, &CloudBackupManager::orphanedBackupsDetected,
 
 connect(manager, &CloudBackupManager::migrationUpdated,
         this, [](QtCloudBackup::MigrationStatus status, int migrated,
-                 int total, const QString &reason) {
+                 int total, int error, const QString &message) {
     if (status == QtCloudBackup::MigrationStatus::MigrationSucceeded)
         qDebug() << "Migrated" << migrated << "of" << total;
 });
