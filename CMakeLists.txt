@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.21)
 
-set(QTCLOUDBACKUP_LIB_VERSION 0.3.0)
+set(QTCLOUDBACKUP_LIB_VERSION 0.3.1)
 
 project(QtCloudBackup VERSION ${QTCLOUDBACKUP_LIB_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Quick Concurrent)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Qml Concurrent)
 qt_standard_project_setup(REQUIRES 6.8)
 
 # Build-time configuration from consuming app
@@ -46,7 +46,7 @@ qt_add_library(QtCloudBackup STATIC ${SOURCES})
 
 target_include_directories(QtCloudBackup PUBLIC src)
 
-target_link_libraries(QtCloudBackup PUBLIC Qt6::Core Qt6::Quick PRIVATE Qt6::Concurrent)
+target_link_libraries(QtCloudBackup PUBLIC Qt6::Core Qt6::Qml PRIVATE Qt6::Concurrent)
 
 target_compile_definitions(QtCloudBackup PRIVATE
     QTCLOUDBACKUP_APP_NAME="${QTCLOUDBACKUP_APP_NAME}"
