@@ -1,11 +1,15 @@
 #include "cloudbackupmanager.h"
 #include "cloudbackupbackend.h"
 #include "backupvalidation.h"
+#include "retentionevaluator.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLoggingCategory>
 #include <QRandomGenerator>
 #include <algorithm>
+
+Q_LOGGING_CATEGORY(managerLog, "qtcloudbackup.manager")
 
 std::unique_ptr<CloudBackupBackend> createPlatformBackend();
 
@@ -288,17 +292,21 @@ QtCloudBackup::RetentionPolicy CloudBackupManager::makeRetentionPolicy(
 
 void CloudBackupManager::pruneBackups(const QString &sourceId)
 {
-    // Interim implementation: honours keepLast only. The full union-of-keeps
-    // evaluator (keepDaily/Weekly/Monthly/Yearly, local-time bucketing,
-    // metadataAvailable handling, min-keep safety invariant) lands in the
-    // next phase.
-    const int keepLast = m_retentionPolicy.keepLast;
-    if (keepLast <= 0)
+    // Guard against re-entrancy from explicit prune() calls during an
+    // in-flight backup write. The post-write auto-trigger sets
+    // m_backupInProgress=false before calling pruneBackups, so it
+    // passes this check.
+    if (m_backupInProgress) {
+        qCDebug(managerLog,
+                "prune skipped while a backup is in progress (sourceId=%s)",
+                qPrintable(sourceId));
         return;
+    }
 
+    const QtCloudBackup::RetentionPolicy policy = m_retentionPolicy;
     auto conn = std::make_shared<QMetaObject::Connection>();
     *conn = connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
-                    [this, sourceId, conn, keepLast](const QList<BackupInfo> &backups) {
+                    [this, sourceId, conn, policy](const QList<BackupInfo> &backups) {
                         disconnect(*conn);
 
                         QList<BackupInfo> matching;
@@ -307,17 +315,10 @@ void CloudBackupManager::pruneBackups(const QString &sourceId)
                                 matching.append(b);
                         }
 
-                        if (matching.size() <= keepLast)
-                            return;
-
-                        std::sort(matching.begin(), matching.end(),
-                                  [](const BackupInfo &a, const BackupInfo &b) {
-                                      return a.timestamp > b.timestamp;
-                                  });
-
-                        for (int i = keepLast; i < matching.size(); ++i) {
-                            m_backend->deleteBackup(matching[i].filename);
-                        }
+                        const auto result =
+                            QtCloudBackup::RetentionEvaluator::evaluate(matching, policy);
+                        for (const QString &filename : result.toDelete)
+                            m_backend->deleteBackup(filename);
                     });
 
     m_backend->scanBackups();
