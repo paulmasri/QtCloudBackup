@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backupinfo.h"
+#include "retentionpolicy.h"
 
 #include <QObject>
 #include <QVariantMap>
@@ -17,7 +18,7 @@ class CloudBackupManager : public QObject {
     Q_PROPERTY(QString statusDetail READ statusDetail NOTIFY statusDetailChanged)
     Q_PROPERTY(QtCloudBackup::StorageType storageType READ storageType NOTIFY storageTypeChanged)
     Q_PROPERTY(bool backupInProgress READ backupInProgress NOTIFY backupInProgressChanged)
-    Q_PROPERTY(int maxBackupsPerSource READ maxBackupsPerSource WRITE setMaxBackupsPerSource NOTIFY maxBackupsPerSourceChanged)
+    Q_PROPERTY(QtCloudBackup::RetentionPolicy retentionPolicy READ retentionPolicy WRITE setRetentionPolicy NOTIFY retentionPolicyChanged)
     Q_PROPERTY(bool hasOrphanedBackups READ hasOrphanedBackups NOTIFY hasOrphanedBackupsChanged)
 
 public:
@@ -28,8 +29,8 @@ public:
     QString statusDetail() const;
     QtCloudBackup::StorageType storageType() const;
     bool backupInProgress() const;
-    int maxBackupsPerSource() const;
-    void setMaxBackupsPerSource(int n);
+    QtCloudBackup::RetentionPolicy retentionPolicy() const;
+    void setRetentionPolicy(const QtCloudBackup::RetentionPolicy &policy);
     bool hasOrphanedBackups() const;
 
     Q_INVOKABLE void createBackup(const QString &sourceId, const QByteArray &data, const QVariantMap &metadata = {});
@@ -38,6 +39,7 @@ public:
     Q_INVOKABLE void restoreBackup(const QString &filename);
     Q_INVOKABLE void deleteBackup(const QString &filename);
     Q_INVOKABLE void refresh();
+    Q_INVOKABLE void prune(const QString &sourceId);
     Q_INVOKABLE void checkForOrphanedBackups();
     Q_INVOKABLE void migrateOrphanedBackups();
 
@@ -46,7 +48,7 @@ signals:
     void statusDetailChanged();
     void storageTypeChanged();
     void backupInProgressChanged();
-    void maxBackupsPerSourceChanged();
+    void retentionPolicyChanged();
     void hasOrphanedBackupsChanged();
 
     void statusChanged(QtCloudBackup::StorageStatus status, const QString &detail);
@@ -74,7 +76,7 @@ private:
 
     std::unique_ptr<CloudBackupBackend> m_backend;
     bool m_backupInProgress = false;
-    int m_maxBackupsPerSource = 3;
+    QtCloudBackup::RetentionPolicy m_retentionPolicy = { .keepLast = 3 };
     QString m_currentBackupSourceId;
     QDateTime m_currentBackupTimestamp;
     QString m_pendingRestoreFilename; // set when auto-downloading for restore

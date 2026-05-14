@@ -21,6 +21,7 @@ set(SOURCES
     src/cloudbackupbackend.h
     src/backupinfo.h
     src/backupvalidation.h
+    src/retentionpolicy.h
     src/platform/fallback/localbackend.h
     src/platform/fallback/localbackend.cpp
 )
@@ -69,4 +70,5 @@ qt_add_qml_module(QtCloudBackup
         src/cloudbackupmanager.h
         src/cloudbackupmanager.cpp
         src/backupinfo.h
+        src/retentionpolicy.h
 )

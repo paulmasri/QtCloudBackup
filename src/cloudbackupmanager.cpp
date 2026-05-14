@@ -142,17 +142,24 @@ bool CloudBackupManager::backupInProgress() const
     return m_backupInProgress;
 }
 
-int CloudBackupManager::maxBackupsPerSource() const
+QtCloudBackup::RetentionPolicy CloudBackupManager::retentionPolicy() const
 {
-    return m_maxBackupsPerSource;
+    return m_retentionPolicy;
 }
 
-void CloudBackupManager::setMaxBackupsPerSource(int n)
+void CloudBackupManager::setRetentionPolicy(const QtCloudBackup::RetentionPolicy &policy)
 {
-    if (m_maxBackupsPerSource == n)
+    if (m_retentionPolicy == policy)
         return;
-    m_maxBackupsPerSource = n;
-    emit maxBackupsPerSourceChanged();
+    m_retentionPolicy = policy;
+    emit retentionPolicyChanged();
+}
+
+void CloudBackupManager::prune(const QString &sourceId)
+{
+    if (sourceId.isEmpty() || !m_backend)
+        return;
+    pruneBackups(sourceId);
 }
 
 void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray &data,
@@ -297,30 +304,34 @@ void CloudBackupManager::handleReadFailed(const QString &filename, int error,
 
 void CloudBackupManager::pruneBackups(const QString &sourceId)
 {
-    // Connect a one-shot to the scan result to perform pruning
+    // Interim implementation: honours keepLast only. The full union-of-keeps
+    // evaluator (keepDaily/Weekly/Monthly/Yearly, local-time bucketing,
+    // metadataAvailable handling, min-keep safety invariant) lands in the
+    // next phase.
+    const int keepLast = m_retentionPolicy.keepLast;
+    if (keepLast <= 0)
+        return;
+
     auto conn = std::make_shared<QMetaObject::Connection>();
     *conn = connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
-                    [this, sourceId, conn](const QList<BackupInfo> &backups) {
+                    [this, sourceId, conn, keepLast](const QList<BackupInfo> &backups) {
                         disconnect(*conn);
 
-                        // Filter to this sourceId
                         QList<BackupInfo> matching;
                         for (const auto &b : backups) {
                             if (b.sourceId == sourceId)
                                 matching.append(b);
                         }
 
-                        if (matching.size() <= m_maxBackupsPerSource)
+                        if (matching.size() <= keepLast)
                             return;
 
-                        // Sort newest first
                         std::sort(matching.begin(), matching.end(),
                                   [](const BackupInfo &a, const BackupInfo &b) {
                                       return a.timestamp > b.timestamp;
                                   });
 
-                        // Delete oldest
-                        for (int i = m_maxBackupsPerSource; i < matching.size(); ++i) {
+                        for (int i = keepLast; i < matching.size(); ++i) {
                             m_backend->deleteBackup(matching[i].filename);
                         }
                     });
