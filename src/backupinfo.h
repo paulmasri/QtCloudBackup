@@ -101,6 +101,7 @@ class BackupInfo {
     Q_PROPERTY(QVariantMap metadata MEMBER metadata)
     Q_PROPERTY(QString filename MEMBER filename)
     Q_PROPERTY(QtCloudBackup::DownloadState downloadState MEMBER downloadState)
+    Q_PROPERTY(bool metadataAvailable MEMBER metadataAvailable)
 
 public:
     QString sourceId;
@@ -108,6 +109,9 @@ public:
     QVariantMap metadata;
     QString filename;
     QtCloudBackup::DownloadState downloadState = QtCloudBackup::DownloadState::Local;
+    // false when the .meta sidecar is missing — may be syncing, evicted, or
+    // never written. The filename still yields sourceId and timestamp.
+    bool metadataAvailable = true;
 };
 
 Q_DECLARE_METATYPE(BackupInfo)

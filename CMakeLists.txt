@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-set(QTCLOUDBACKUP_LIB_VERSION 0.3.1)
+set(QTCLOUDBACKUP_LIB_VERSION 0.4.0)
 
 project(QtCloudBackup VERSION ${QTCLOUDBACKUP_LIB_VERSION} LANGUAGES CXX)
 
@@ -21,6 +21,9 @@ set(SOURCES
     src/cloudbackupbackend.h
     src/backupinfo.h
     src/backupvalidation.h
+    src/retentionpolicy.h
+    src/retentionevaluator.h
+    src/retentionevaluator.cpp
     src/platform/fallback/localbackend.h
     src/platform/fallback/localbackend.cpp
 )
@@ -61,6 +64,12 @@ elseif(WIN32)
     target_link_libraries(QtCloudBackup PRIVATE shell32)
 endif()
 
+option(QTCLOUDBACKUP_BUILD_TESTS "Build QtCloudBackup ad-hoc test executables" OFF)
+if(QTCLOUDBACKUP_BUILD_TESTS)
+    qt_add_executable(test_retention tools/test_retention.cpp)
+    target_link_libraries(test_retention PRIVATE QtCloudBackup Qt6::Core)
+endif()
+
 qt_add_qml_module(QtCloudBackup
     URI QtCloudBackup
     VERSION 1.0
@@ -69,4 +78,5 @@ qt_add_qml_module(QtCloudBackup
         src/cloudbackupmanager.h
         src/cloudbackupmanager.cpp
         src/backupinfo.h
+        src/retentionpolicy.h
 )

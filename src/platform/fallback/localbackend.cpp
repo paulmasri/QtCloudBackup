@@ -23,12 +23,6 @@ std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 
 static constexpr qint64 MaxMetaFileSize = 1024 * 1024; // 1 MB
 
-QString LocalBackend::backupDir() const
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-           + QStringLiteral("/Backups");
-}
-
 void LocalBackend::initialise()
 {
     QString dir = backupDir();
@@ -99,10 +93,12 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
             }
         }
 
-        // Write .meta file atomically
+        // Write .meta file atomically. On failure, roll back the .bak so the
+        // writer-local invariant (complete backup ⇔ both files exist) holds.
         {
             QSaveFile file(metaPath);
             if (!file.open(QIODevice::WriteOnly)) {
+                QFile::remove(bakPath);
                 QMetaObject::invokeMethod(qApp, [self, filename,
                         msg = LocalBackend::tr("Failed to open metadata file for writing")] {
                     if (!self) return;
@@ -113,6 +109,7 @@ void LocalBackend::writeBackup(const QString &filename, const QByteArray &data,
             }
             file.write(QJsonDocument(meta).toJson(QJsonDocument::Compact));
             if (!file.commit()) {
+                QFile::remove(bakPath);
                 QMetaObject::invokeMethod(qApp, [self, filename,
                         msg = LocalBackend::tr("Failed to write metadata file")] {
                     if (!self) return;
@@ -173,9 +170,14 @@ void LocalBackend::deleteBackup(const QString &filename)
         QString bakPath = dir + QLatin1Char('/') + filename;
         QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
-        bool ok = QFile::remove(bakPath);
+        // Delete .meta first (the completion marker), then .bak. Mirrors the
+        // write protocol: .bak written first, .meta last. If interrupted after
+        // .meta removal but before .bak removal, the .bak is left as an orphan
+        // which the scanner surfaces with metadataAvailable=false rather than
+        // an invisible orphan .meta.
         if (!QFile::remove(metaPath) && QFile::exists(metaPath))
             qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
+        bool ok = QFile::remove(bakPath);
 
         int err = ok ? int(QtCloudBackup::BackupError::NoError)
                      : int(QtCloudBackup::BackupError::IOError);
@@ -205,7 +207,11 @@ void LocalBackend::scanBackups()
             info.filename = entry;
             info.downloadState = QtCloudBackup::DownloadState::Local;
 
-            // Try to read .meta sidecar (bounded)
+            // Try to read .meta sidecar (bounded). A missing .meta is not
+            // junk — under cloud sync it may be syncing, evicted, or it may
+            // be a stale orphan from an interrupted delete. Surface honestly
+            // via metadataAvailable=false and let the consumer/retention
+            // decide how to treat it.
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
@@ -214,9 +220,12 @@ void LocalBackend::scanBackups()
                 info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
                                                         Qt::ISODateWithMs);
                 info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+            } else {
+                info.metadataAvailable = false;
             }
 
-            // Fallback: parse filename
+            // Fallback: parse filename (always needed when .meta is missing,
+            // and a safety net when .meta is malformed)
             if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
                 auto match = re.match(entry);
                 if (match.hasMatch()) {
@@ -256,4 +265,10 @@ void LocalBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> &)
 {
     // Nothing to migrate
     emit migrationCompleted(0, int(QtCloudBackup::BackupError::NoError), QString());
+}
+
+QString LocalBackend::backupDir() const
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+           + QStringLiteral("/Backups");
 }

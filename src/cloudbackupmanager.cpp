@@ -1,11 +1,15 @@
 #include "cloudbackupmanager.h"
 #include "cloudbackupbackend.h"
 #include "backupvalidation.h"
+#include "retentionevaluator.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLoggingCategory>
 #include <QRandomGenerator>
 #include <algorithm>
+
+Q_LOGGING_CATEGORY(managerLog, "qtcloudbackup.manager")
 
 std::unique_ptr<CloudBackupBackend> createPlatformBackend();
 
@@ -142,17 +146,22 @@ bool CloudBackupManager::backupInProgress() const
     return m_backupInProgress;
 }
 
-int CloudBackupManager::maxBackupsPerSource() const
+QtCloudBackup::RetentionPolicy CloudBackupManager::retentionPolicy() const
 {
-    return m_maxBackupsPerSource;
+    return m_retentionPolicy;
 }
 
-void CloudBackupManager::setMaxBackupsPerSource(int n)
+void CloudBackupManager::setRetentionPolicy(const QtCloudBackup::RetentionPolicy &policy)
 {
-    if (m_maxBackupsPerSource == n)
+    if (m_retentionPolicy == policy)
         return;
-    m_maxBackupsPerSource = n;
-    emit maxBackupsPerSourceChanged();
+    m_retentionPolicy = policy;
+    emit retentionPolicyChanged();
+}
+
+bool CloudBackupManager::hasOrphanedBackups() const
+{
+    return !m_orphanedBackups.isEmpty();
 }
 
 void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray &data,
@@ -253,9 +262,11 @@ void CloudBackupManager::refresh()
     m_backend->initialise();
 }
 
-bool CloudBackupManager::hasOrphanedBackups() const
+void CloudBackupManager::prune(const QString &sourceId)
 {
-    return !m_orphanedBackups.isEmpty();
+    if (sourceId.isEmpty() || !m_backend)
+        return;
+    pruneBackups(sourceId);
 }
 
 void CloudBackupManager::checkForOrphanedBackups()
@@ -271,6 +282,46 @@ void CloudBackupManager::migrateOrphanedBackups()
                           0, m_orphanedBackups.size(),
                           int(QtCloudBackup::BackupError::NoError), QString());
     m_backend->migrateOrphanedBackups(m_orphanedBackups);
+}
+
+QtCloudBackup::RetentionPolicy CloudBackupManager::makeRetentionPolicy(
+    int keepLast, int keepDaily, int keepWeekly, int keepMonthly, int keepYearly) const
+{
+    return { keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly };
+}
+
+void CloudBackupManager::pruneBackups(const QString &sourceId)
+{
+    // Guard against re-entrancy from explicit prune() calls during an
+    // in-flight backup write. The post-write auto-trigger sets
+    // m_backupInProgress=false before calling pruneBackups, so it
+    // passes this check.
+    if (m_backupInProgress) {
+        qCDebug(managerLog,
+                "prune skipped while a backup is in progress (sourceId=%s)",
+                qPrintable(sourceId));
+        return;
+    }
+
+    const QtCloudBackup::RetentionPolicy policy = m_retentionPolicy;
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
+                    [this, sourceId, conn, policy](const QList<BackupInfo> &backups) {
+                        disconnect(*conn);
+
+                        QList<BackupInfo> matching;
+                        for (const auto &b : backups) {
+                            if (b.sourceId == sourceId)
+                                matching.append(b);
+                        }
+
+                        const auto result =
+                            QtCloudBackup::RetentionEvaluator::evaluate(matching, policy);
+                        for (const QString &filename : result.toDelete)
+                            m_backend->deleteBackup(filename);
+                    });
+
+    m_backend->scanBackups();
 }
 
 void CloudBackupManager::handleReadFailed(const QString &filename, int error,
@@ -293,37 +344,4 @@ void CloudBackupManager::handleReadFailed(const QString &filename, int error,
     emit backupInProgressChanged();
     emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
                         error, message);
-}
-
-void CloudBackupManager::pruneBackups(const QString &sourceId)
-{
-    // Connect a one-shot to the scan result to perform pruning
-    auto conn = std::make_shared<QMetaObject::Connection>();
-    *conn = connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
-                    [this, sourceId, conn](const QList<BackupInfo> &backups) {
-                        disconnect(*conn);
-
-                        // Filter to this sourceId
-                        QList<BackupInfo> matching;
-                        for (const auto &b : backups) {
-                            if (b.sourceId == sourceId)
-                                matching.append(b);
-                        }
-
-                        if (matching.size() <= m_maxBackupsPerSource)
-                            return;
-
-                        // Sort newest first
-                        std::sort(matching.begin(), matching.end(),
-                                  [](const BackupInfo &a, const BackupInfo &b) {
-                                      return a.timestamp > b.timestamp;
-                                  });
-
-                        // Delete oldest
-                        for (int i = m_maxBackupsPerSource; i < matching.size(); ++i) {
-                            m_backend->deleteBackup(matching[i].filename);
-                        }
-                    });
-
-    m_backend->scanBackups();
 }

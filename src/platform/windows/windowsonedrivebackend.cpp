@@ -83,20 +83,6 @@ std::unique_ptr<CloudBackupBackend> createPlatformBackend()
     return std::make_unique<WindowsOneDriveBackend>();
 }
 
-QString WindowsOneDriveBackend::backupDir() const
-{
-    const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
-    if (relPath.isEmpty())
-        return m_backupRoot;
-    return m_backupRoot + QLatin1Char('/') + relPath;
-}
-
-QString WindowsOneDriveBackend::localFallbackDir() const
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-           + QStringLiteral("/Backups");
-}
-
 void WindowsOneDriveBackend::initialise()
 {
     QPointer<WindowsOneDriveBackend> self(this);
@@ -219,10 +205,12 @@ void WindowsOneDriveBackend::writeBackup(const QString &filename, const QByteArr
             }
         }
 
-        // Write .meta file atomically
+        // Write .meta file atomically. On failure, roll back the .bak so the
+        // writer-local invariant (complete backup ⇔ both files exist) holds.
         {
             QSaveFile file(metaPath);
             if (!file.open(QIODevice::WriteOnly)) {
+                QFile::remove(bakPath);
                 QMetaObject::invokeMethod(qApp, [self, filename,
                         msg = WindowsOneDriveBackend::tr("Failed to open metadata file for writing")] {
                     if (!self) return;
@@ -233,6 +221,7 @@ void WindowsOneDriveBackend::writeBackup(const QString &filename, const QByteArr
             }
             file.write(QJsonDocument(meta).toJson(QJsonDocument::Compact));
             if (!file.commit()) {
+                QFile::remove(bakPath);
                 QMetaObject::invokeMethod(qApp, [self, filename,
                         msg = WindowsOneDriveBackend::tr("Failed to write metadata file")] {
                     if (!self) return;
@@ -299,9 +288,14 @@ void WindowsOneDriveBackend::deleteBackup(const QString &filename)
         QString bakPath = dir + QLatin1Char('/') + filename;
         QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
-        bool ok = QFile::remove(bakPath);
+        // Delete .meta first (the completion marker), then .bak. Mirrors the
+        // write protocol: .bak first, .meta last. If interrupted between the
+        // two removals, an orphan .bak is left and the scanner surfaces it
+        // with metadataAvailable=false rather than leaving an invisible
+        // orphan .meta.
         if (!QFile::remove(metaPath) && QFile::exists(metaPath))
             qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
+        bool ok = QFile::remove(bakPath);
 
         int err = ok ? int(QtCloudBackup::BackupError::NoError)
                      : int(QtCloudBackup::BackupError::IOError);
@@ -340,7 +334,10 @@ void WindowsOneDriveBackend::scanBackups()
                 info.downloadState = QtCloudBackup::DownloadState::Local;
             }
 
-            // Try to read .meta sidecar (bounded)
+            // Try to read .meta sidecar (bounded). A missing .meta is not
+            // junk under cloud sync — surface honestly via
+            // metadataAvailable=false. May also indicate a Files-On-Demand
+            // placeholder that hasn't yet hydrated.
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
@@ -349,9 +346,12 @@ void WindowsOneDriveBackend::scanBackups()
                 info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
                                                         Qt::ISODateWithMs);
                 info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+            } else {
+                info.metadataAvailable = false;
             }
 
-            // Fallback: parse filename
+            // Fallback: parse filename (always needed when .meta is missing,
+            // and a safety net when .meta is malformed)
             if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
                 auto match = re.match(entry);
                 if (match.hasMatch()) {
@@ -555,4 +555,18 @@ void WindowsOneDriveBackend::migrateOrphanedBackups(const QList<OrphanedBackupIn
             emit self->migrationCompleted(count, err, msg);
         }, Qt::QueuedConnection);
     });
+}
+
+QString WindowsOneDriveBackend::backupDir() const
+{
+    const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
+    if (relPath.isEmpty())
+        return m_backupRoot;
+    return m_backupRoot + QLatin1Char('/') + relPath;
+}
+
+QString WindowsOneDriveBackend::localFallbackDir() const
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+           + QStringLiteral("/Backups");
 }

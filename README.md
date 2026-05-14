@@ -132,7 +132,7 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 | `statusDetail` | `QString` | Human-readable status detail |
 | `storageType` | `StorageType` | Which backend is active |
 | `backupInProgress` | `bool` | Whether a create/restore operation is running |
-| `maxBackupsPerSource` | `int` | Pruning threshold per source ID (default: 3) |
+| `retentionPolicy` | `RetentionPolicy` | Configurable union-of-keeps retention (default: `{ keepLast = 3 }`). See [How pruning works](#how-pruning-works). |
 | `hasOrphanedBackups` | `bool` | Whether orphaned backups were found (see [Orphaned backup migration](#orphaned-backup-migration)) |
 
 ### Methods (Q_INVOKABLE)
@@ -145,8 +145,10 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
 | `deleteBackup(filename)` | Delete a backup and its metadata sidecar |
 | `refresh()` | Re-check cloud availability and reinitialise |
+| `prune(sourceId)` | Apply the current `retentionPolicy` to `sourceId` immediately. Useful after a policy change. No-op while a backup is in progress. |
 | `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
+| `makeRetentionPolicy(keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly)` | Factory for constructing a `RetentionPolicy` from QML — gadget value types can't be assembled via JS-object literals. See [QML usage example](#qml-usage-example). |
 
 ### Signals
 
@@ -180,6 +182,27 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 
 **BackupError**: `NoError`, `InvalidArgument`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadFailed`, `DownloadTimeout`, `MigrationPartial`, `UnknownError`
 
+### Value types
+
+**RetentionPolicy** — five independent keep rules, each defaulting to 0 (disabled). See [How pruning works](#how-pruning-works) for semantics.
+
+| Field | Description |
+|-------|-------------|
+| `keepLast` | N most recent backups overall, no time-bucketing |
+| `keepDaily` | Latest of each of the N most-recent days-with-backups |
+| `keepWeekly` | Latest of each of the N most-recent ISO-weeks-with-backups |
+| `keepMonthly` | Latest of each of the N most-recent calendar-months-with-backups |
+| `keepYearly` | Latest of each of the N most-recent calendar-years-with-backups |
+
+**BackupInfo** — entries in `backupsListed`:
+
+| Field | Description |
+|-------|-------------|
+| `sourceId`, `timestamp`, `filename` | Identifying fields |
+| `metadata` | Application-supplied map from `createBackup` |
+| `downloadState` | `Local` / `CloudOnly` / `Downloading` / `Error` |
+| `metadataAvailable` | `true` when the `.meta` sidecar was readable. `false` when the `.bak` is observed without its `.meta` (mid-sync, evicted, or orphaned). Consumers may render these as "metadata syncing"; retention treats them as present-but-unconfirmed. |
+
 ## QML usage example
 
 ```qml
@@ -189,7 +212,13 @@ import QtCloudBackup
 Item {
     CloudBackupManager {
         id: backupManager
-        maxBackupsPerSource: 3
+        // RetentionPolicy is a gadget value type — assign a whole struct, not
+        // sub-properties. Use makeRetentionPolicy() to build it from QML.
+        Component.onCompleted: {
+            backupManager.retentionPolicy =
+                backupManager.makeRetentionPolicy(3, 7, 4, 12, 0)
+            //   keepLast=3, keepDaily=7, keepWeekly=4, keepMonthly=12, keepYearly=0
+        }
 
         onStatusChanged: (status, detail) => {
             console.log("Storage:", detail)
@@ -238,7 +267,8 @@ Item {
 #include <QtCloudBackup/cloudbackupmanager.h>
 
 auto *manager = new CloudBackupManager(this);
-manager->setMaxBackupsPerSource(3);
+manager->setRetentionPolicy({ .keepLast = 3, .keepDaily = 7,
+                              .keepWeekly = 4, .keepMonthly = 12 });
 
 connect(manager, &CloudBackupManager::backupSucceeded,
         this, [](const QString &filename, const QDateTime &timestamp) {
@@ -271,7 +301,144 @@ manager->listBackups();
 
 ## How pruning works
 
-After each successful `createBackup()`, the manager scans for all backups matching the same `sourceId` and deletes the oldest ones that exceed `maxBackupsPerSource` (default: 3). Pruning happens automatically — the consuming app does not need to manage it.
+QtCloudBackup uses the **union-of-keeps** retention model familiar from Borg, restic, sanoid, rsnapshot, and (in hardcoded form) Apple Time Machine. A `RetentionPolicy` is a flat collection of five independent keep rules; the set of backups *kept* is the union of every rule's selection, the set *pruned* is everything else. Rules are order-agnostic — `keepDaily 7 + keepWeekly 4` produces the same result as `keepWeekly 4 + keepDaily 7` — and a single backup can satisfy multiple rules (it's kept once).
+
+Pruning runs automatically after each successful `createBackup()` against the just-written `sourceId`, and can be triggered manually via `prune(sourceId)`. The library never persists the policy itself — the consuming app owns persistence (typically `QSettings`) and sets the policy on the manager at startup.
+
+### Worked examples
+
+#### Today + recent days
+
+> "Keep the latest 2 from today, plus the latest one from each of the 5 most-recent prior days that had backups."
+
+```cpp
+RetentionPolicy { .keepLast = 2, .keepDaily = 6 }
+```
+
+`keepLast = 2` keeps the 2 most recent backups overall (today's, since today is by definition the most recent day with backups). `keepDaily = 6` keeps the latest of each of the 6 most-recent days-with-backups: today plus 5 prior. The "+1" is intentional — a daily rule *includes today* as one of its N days. To get "today plus N prior", ask for `keepDaily (N+1)`. This is the standard Borg/restic convention.
+
+#### Generational rotation
+
+> "Latest 10, plus daily for a week, weekly for a month, monthly for a year."
+
+```cpp
+RetentionPolicy {
+    .keepLast    = 10,
+    .keepDaily   = 7,
+    .keepWeekly  = 4,
+    .keepMonthly = 12,
+}
+```
+
+Four independent rules; their selections overlap (today's backup is in all four; the latest backup of each Sunday is in three; etc.) and the union is what's kept.
+
+#### Simple keep-latest-N
+
+```cpp
+RetentionPolicy { .keepLast = 5 }
+```
+
+Equivalent to a "keep only the most recent N" policy. No bucketing.
+
+#### Long-tail history with dense recent
+
+> "All backups from the last few days, then thinning out indefinitely."
+
+```cpp
+RetentionPolicy {
+    .keepLast    = 20,
+    .keepWeekly  = 8,
+    .keepMonthly = 24,
+    .keepYearly  = 10,
+}
+```
+
+Total retained ≈ 20 + 8 + 24 + 10 = 62 (overlap reduces the actual count).
+
+#### Zero retention (safety net engages)
+
+```cpp
+RetentionPolicy { }   // all fields zero
+```
+
+Every rule disabled. The min-keep safety invariant overrides: the latest backup for the active `sourceId` is retained anyway, and a warning is logged on `qtcloudbackup.retention`. This is the practical "I want as little as possible" policy.
+
+### The "today is consumed by keepDaily" rule
+
+This is the single most common point of user confusion. A daily rule's first bucket is *today*, not "yesterday".
+
+**Trace.** State before write: yesterday × 4, day-2 × 1, day-4 × 1, day-7 × 1, day-10 × 1. Just wrote: today's 1st backup. Apply `RetentionPolicy { .keepLast = 3, .keepDaily = 5 }`:
+
+- `keepLast = 3` selects: today, yesterday's most recent, yesterday's 2nd most recent.
+- `keepDaily = 5` selects: today, yesterday's latest, day-2, day-4, day-7.
+
+**Union**: today + yesterday-latest + yesterday-2nd + day-2 + day-4 + day-7 = 6 retained. **Pruned**: yesterday's two oldest + day-10.
+
+Properties that fall out:
+- The just-written backup is always safe (most recent overall + latest of today).
+- `keepLast` "spills" into prior days when today is sparse: with 1 backup today and `keepLast = 3`, the other 2 slots come from yesterday.
+- `keepDaily = 5` includes today as one of its 5 days. For "today plus 5 prior days", ask for `keepDaily = 6`.
+
+### Days-with-backups, not calendar days (the holiday-gap property)
+
+Every bucketed rule counts **buckets that contain backups**, not calendar buckets. This is a deliberate safety property inherited from Borg/restic: if you go on holiday for two weeks and don't back up, you don't return to find the policy has pruned everything.
+
+> A user backs up daily, then takes a 2-week holiday with no backups, then resumes today.
+>
+> - `keepLast 10`: today + the 9 most-recent backups before the holiday.
+> - `keepDaily 7`: today + the 6 most-recent *days-with-backups* before the holiday. The 14-day gap is irrelevant.
+> - `keepWeekly 4`: this week + the 3 most-recent *ISO-weeks-with-backups* before the holiday.
+> - `keepMonthly 12`: this month + the 11 most-recent *months-with-backups*.
+>
+> The retained set looks essentially the same as it would without the holiday: dense recent + thinning history.
+
+The alternative reading — "the last 7 calendar days" — would be catastrophic here: returning after a holiday, `keepDaily 7` would find 0 backups in the last 7 calendar days and prune everything. The library never does this.
+
+If you have a single backup from 3 years ago and no activity since, `keepYearly 1` keeps it indefinitely. It's the only record from that year; the library will not delete it just because no new years-with-backups have accumulated.
+
+### Local-time bucketing
+
+All bucketing is done in **local time**. Day boundaries are local midnight; ISO week boundaries are local Monday 00:00; month boundaries are the 1st of the local month, 00:00; year boundaries are 1 January 00:00.
+
+Edge case: a backup taken at 23:59 and another at 00:01 fall into **different** day-buckets. Users near midnight should expect this.
+
+### Per-`sourceId` independence
+
+Retention is evaluated **per `sourceId`**. Each source maintains its own independent bucketing. Two source IDs sharing a storage target do not compete for retention slots.
+
+**Pruning applies only to the `sourceId` that just received a successful write** — or the `sourceId` passed to an explicit `prune()`. Backups for other source IDs are never touched. This matters because two devices may share a storage target (e.g. the same iCloud container) running different app versions with different policies; the running app must not impose its policy on the other device's data.
+
+### Cloud-sync caveat — `metadataAvailable`
+
+A backup is two files: `.bak` (data) and `.meta` (a JSON sidecar with `sourceId`, `timestamp`, and the application metadata map). The two-file structure is consistent on the writer's filesystem at the moment of writing — see [File-level atomicity](#file-level-atomicity). Cloud sync, however, has **no atomicity across multiple files**: iCloud and OneDrive sync per file, evict per file, and in iOS evictions can be aggressive.
+
+The consequence: a reader on another device, or the writer after iOS evicts cached content, may observe partial state — `.bak` present without `.meta`, or vice versa. The scanner surfaces these honestly via `BackupInfo.metadataAvailable`:
+
+- **`.bak` with `.meta`**: `metadataAvailable = true`. Standard case.
+- **`.bak` without `.meta`**: `metadataAvailable = false`. The filename still encodes `sourceId` and `timestamp` (so those populate), but the user-supplied metadata map is empty.
+
+Retention treats `metadataAvailable == false` entries as **present but unconfirmed**:
+
+- **Excluded from prune candidates.** Not enough information to decide; safer to leave alone until a future scan.
+- **Counted toward bucket occupancy.** A day with only a metadata-pending backup still counts as "this day has backups" for the purpose of N.
+- **Counted toward the minimum-keep safety net.** Real files representing real backup data; their existence prevents retention from concluding "we have no backups".
+
+Consequence: a mid-sync backup is left alone on this prune pass and gets full treatment on the next scan, once the `.meta` has arrived (or been hydrated). Consumers that need an atomic single-unit backup can embed any application metadata directly in the `.bak` payload — the library's `.meta` sidecar is reserved for library bookkeeping and is best-effort under cloud sync.
+
+### Minimum-keep safety invariant
+
+If the policy would prune every backup for the active `sourceId`, the latest one is retained anyway. A warning is logged on the `qtcloudbackup.retention` logging category. This makes a misconfigured all-zero policy non-catastrophic.
+
+If there are any `metadataAvailable = false` entries (mid-sync, evicted), the safety net is already satisfied — those entries are never pruned and represent real backup data, so no force-keep of confirmed entries is needed.
+
+## File-level atomicity
+
+The library maintains a **writer-local invariant**: at the moment a write or delete returns, the writer's local filesystem holds either both files or neither.
+
+- **Writes** are `.bak` first, then `.meta`. If the `.meta` write fails after the `.bak` succeeded, the `.bak` is rolled back. All three backends behave the same way.
+- **Deletes** are `.meta` first, then `.bak`. If the delete is interrupted between the two removals, what remains is an orphan `.bak` — surfaced by the scanner with `metadataAvailable = false` rather than left invisible.
+
+This invariant holds **only** at the writer's local filesystem at write/delete time. Cross-device consistency under cloud sync is not guaranteed in real time — see [the cloud-sync caveat](#cloud-sync-caveat--metadataavailable).
 
 ## Orphaned backup migration
 

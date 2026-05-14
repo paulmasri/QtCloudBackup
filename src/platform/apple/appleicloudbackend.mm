@@ -124,113 +124,6 @@ QtCloudBackup::StorageType AppleICloudBackend::storageType() const
     return QtCloudBackup::StorageType::ICloud;
 }
 
-QString AppleICloudBackend::backupDir() const
-{
-    return m_containerUrl.toLocalFile();
-}
-
-QString AppleICloudBackend::localFallbackDir() const
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-           + QStringLiteral("/Backups");
-}
-
-// --- NSMetadataQuery for file discovery and remote change detection ---
-
-void AppleICloudBackend::startMetadataQuery()
-{
-    QMutexLocker locker(&m_queryGuard->mutex);
-    if (m_queryGuard->query)
-        return;
-
-    @autoreleasepool {
-        NSMetadataQuery *query = [[NSMetadataQuery alloc] init];
-        query.searchScopes = @[NSMetadataQueryUbiquitousDataScope];
-        query.predicate = [NSPredicate predicateWithFormat:@"%K LIKE 'qtcloudbackup_*.bak'",
-                           NSMetadataItemFSNameKey];
-
-        QPointer<AppleICloudBackend> guard(this);
-
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:NSMetadataQueryDidFinishGatheringNotification
-                        object:query
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *) {
-                        if (guard)
-                            guard->handleQueryResults();
-                    }];
-
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:NSMetadataQueryDidUpdateNotification
-                        object:query
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *) {
-                        if (!guard)
-                            return;
-                        // Don't iterate note.userInfo items — they are proxy objects
-                        // that can be deallocated by the time this block runs, causing
-                        // EXC_BAD_ACCESS. Instead, just notify that changes occurred.
-                        guard->handleQueryResults();
-                    }];
-
-        [query startQuery];
-        m_queryGuard->query = (void *)CFBridgingRetain(query);
-    }
-}
-
-void AppleICloudBackend::stopMetadataQuery()
-{
-    QMutexLocker locker(&m_queryGuard->mutex);
-    if (!m_queryGuard->query)
-        return;
-
-    @autoreleasepool {
-        NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_queryGuard->query;
-        [query stopQuery];
-        [[NSNotificationCenter defaultCenter] removeObserver:query];
-        CFRelease(m_queryGuard->query);
-        m_queryGuard->query = nullptr;
-    }
-}
-
-void AppleICloudBackend::handleQueryResults()
-{
-    // Called from NSMetadataQuery notifications on the main thread.
-    // Access the query's results array (safe) rather than notification
-    // userInfo items (proxy objects that can be deallocated).
-    QMutexLocker locker(&m_queryGuard->mutex);
-    if (!m_queryGuard->query)
-        return;
-
-    @autoreleasepool {
-        NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_queryGuard->query;
-        [query disableUpdates];
-
-        static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
-
-        QSet<QString> sourceIds;
-        for (NSUInteger i = 0; i < query.resultCount; i++) {
-            NSMetadataItem *item = [query resultAtIndex:i];
-            NSString *name = [item valueForAttribute:NSMetadataItemFSNameKey];
-            if (!name)
-                continue;
-            QString qName = QString::fromNSString(name);
-            auto match = re.match(qName);
-            if (match.hasMatch())
-                sourceIds.insert(match.captured(1));
-        }
-
-        [query enableUpdates];
-        locker.unlock();
-
-        for (const QString &sourceId : sourceIds)
-            emit remoteChangeDetected(sourceId);
-    }
-}
-
-// --- File operations ---
-
 void AppleICloudBackend::writeBackup(const QString &filename, const QByteArray &data,
                                       const QJsonObject &meta)
 {
@@ -447,6 +340,18 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
             __block int errorCode = int(QtCloudBackup::BackupError::NoError);
             __block QString errorMsg;
 
+            // Delete .meta first (the completion marker), then .bak. Mirrors the
+            // write protocol (.bak first, .meta last) and ensures that an
+            // interruption between the two removals leaves an orphan .bak that
+            // the scanner surfaces with metadataAvailable=false, rather than an
+            // invisible orphan .meta.
+            NSError *metaRemoveError = nil;
+            if (![[NSFileManager defaultManager] removeItemAtURL:metaUrl error:&metaRemoveError]
+                && metaRemoveError.code != NSFileNoSuchFileError) {
+                qWarning("Failed to remove metadata sidecar: %s",
+                         qPrintable(QString::fromNSString(metaRemoveError.localizedDescription)));
+            }
+
             NSError *coordError = nil;
             [coordinator coordinateWritingItemAtURL:bakUrl
                                            options:NSFileCoordinatorWritingForDeleting
@@ -466,14 +371,6 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
                 errorCode = int(QtCloudBackup::BackupError::CoordinationFailed);
                 errorMsg = AppleICloudBackend::tr("File coordination failed for delete: %1")
                     .arg(QString::fromNSString(coordError.localizedDescription));
-            }
-
-            // Delete meta sidecar
-            NSError *metaRemoveError = nil;
-            if (![[NSFileManager defaultManager] removeItemAtURL:metaUrl error:&metaRemoveError]
-                && metaRemoveError.code != NSFileNoSuchFileError) {
-                qWarning("Failed to remove metadata sidecar: %s",
-                         qPrintable(QString::fromNSString(metaRemoveError.localizedDescription)));
             }
 
             // Resolve any file version conflicts
@@ -531,7 +428,9 @@ void AppleICloudBackend::scanBackups()
                     info.downloadState = QtCloudBackup::DownloadState::Downloading;
                 }
 
-                // Try to read .meta sidecar (bounded)
+                // Try to read .meta sidecar (bounded). A missing .meta is
+                // not junk under cloud sync — it may be syncing, evicted, or
+                // a stale orphan. Surface honestly via metadataAvailable=false.
                 QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
                 QFile metaFile(metaPath);
                 if (metaFile.open(QIODevice::ReadOnly)) {
@@ -540,9 +439,12 @@ void AppleICloudBackend::scanBackups()
                     info.timestamp = QDateTime::fromString(
                         meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
                     info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                } else {
+                    info.metadataAvailable = false;
                 }
 
-                // Fallback: parse filename
+                // Fallback: parse filename (always needed when .meta is
+                // missing, and a safety net when .meta is malformed)
                 if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
                     auto match = re.match(entry);
                     if (match.hasMatch()) {
@@ -579,6 +481,11 @@ void AppleICloudBackend::scanBackups()
                         BackupInfo info;
                         info.filename = qName;
                         info.downloadState = QtCloudBackup::DownloadState::CloudOnly;
+                        // Cloud-only: .bak isn't on local disk, so we haven't
+                        // read its .meta sidecar either. Mark as unconfirmed
+                        // so retention excludes from prune candidates until
+                        // a subsequent scan after hydration.
+                        info.metadataAvailable = false;
 
                         // Check download percentage
                         NSNumber *percent = [item valueForAttribute:
@@ -587,7 +494,7 @@ void AppleICloudBackend::scanBackups()
                             info.downloadState = QtCloudBackup::DownloadState::Downloading;
                         }
 
-                        // Parse filename for metadata
+                        // Parse filename for sourceId + timestamp
                         auto match = re.match(qName);
                         if (match.hasMatch()) {
                             info.sourceId = match.captured(1);
@@ -878,4 +785,109 @@ void AppleICloudBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> 
             }, Qt::QueuedConnection);
         }
     });
+}
+
+QString AppleICloudBackend::backupDir() const
+{
+    return m_containerUrl.toLocalFile();
+}
+
+QString AppleICloudBackend::localFallbackDir() const
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+           + QStringLiteral("/Backups");
+}
+
+// --- NSMetadataQuery for file discovery and remote change detection ---
+
+void AppleICloudBackend::startMetadataQuery()
+{
+    QMutexLocker locker(&m_queryGuard->mutex);
+    if (m_queryGuard->query)
+        return;
+
+    @autoreleasepool {
+        NSMetadataQuery *query = [[NSMetadataQuery alloc] init];
+        query.searchScopes = @[NSMetadataQueryUbiquitousDataScope];
+        query.predicate = [NSPredicate predicateWithFormat:@"%K LIKE 'qtcloudbackup_*.bak'",
+                           NSMetadataItemFSNameKey];
+
+        QPointer<AppleICloudBackend> guard(this);
+
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSMetadataQueryDidFinishGatheringNotification
+                        object:query
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *) {
+                        if (guard)
+                            guard->handleQueryResults();
+                    }];
+
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSMetadataQueryDidUpdateNotification
+                        object:query
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *) {
+                        if (!guard)
+                            return;
+                        // Don't iterate note.userInfo items — they are proxy objects
+                        // that can be deallocated by the time this block runs, causing
+                        // EXC_BAD_ACCESS. Instead, just notify that changes occurred.
+                        guard->handleQueryResults();
+                    }];
+
+        [query startQuery];
+        m_queryGuard->query = (void *)CFBridgingRetain(query);
+    }
+}
+
+void AppleICloudBackend::stopMetadataQuery()
+{
+    QMutexLocker locker(&m_queryGuard->mutex);
+    if (!m_queryGuard->query)
+        return;
+
+    @autoreleasepool {
+        NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_queryGuard->query;
+        [query stopQuery];
+        [[NSNotificationCenter defaultCenter] removeObserver:query];
+        CFRelease(m_queryGuard->query);
+        m_queryGuard->query = nullptr;
+    }
+}
+
+void AppleICloudBackend::handleQueryResults()
+{
+    // Called from NSMetadataQuery notifications on the main thread.
+    // Access the query's results array (safe) rather than notification
+    // userInfo items (proxy objects that can be deallocated).
+    QMutexLocker locker(&m_queryGuard->mutex);
+    if (!m_queryGuard->query)
+        return;
+
+    @autoreleasepool {
+        NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_queryGuard->query;
+        [query disableUpdates];
+
+        static const QRegularExpression re(
+            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
+
+        QSet<QString> sourceIds;
+        for (NSUInteger i = 0; i < query.resultCount; i++) {
+            NSMetadataItem *item = [query resultAtIndex:i];
+            NSString *name = [item valueForAttribute:NSMetadataItemFSNameKey];
+            if (!name)
+                continue;
+            QString qName = QString::fromNSString(name);
+            auto match = re.match(qName);
+            if (match.hasMatch())
+                sourceIds.insert(match.captured(1));
+        }
+
+        [query enableUpdates];
+        locker.unlock();
+
+        for (const QString &sourceId : sourceIds)
+            emit remoteChangeDetected(sourceId);
+    }
 }
