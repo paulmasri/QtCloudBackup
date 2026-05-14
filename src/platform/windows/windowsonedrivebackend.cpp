@@ -348,7 +348,10 @@ void WindowsOneDriveBackend::scanBackups()
                 info.downloadState = QtCloudBackup::DownloadState::Local;
             }
 
-            // Try to read .meta sidecar (bounded)
+            // Try to read .meta sidecar (bounded). A missing .meta is not
+            // junk under cloud sync — surface honestly via
+            // metadataAvailable=false. May also indicate a Files-On-Demand
+            // placeholder that hasn't yet hydrated.
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
@@ -357,9 +360,12 @@ void WindowsOneDriveBackend::scanBackups()
                 info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
                                                         Qt::ISODateWithMs);
                 info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+            } else {
+                info.metadataAvailable = false;
             }
 
-            // Fallback: parse filename
+            // Fallback: parse filename (always needed when .meta is missing,
+            // and a safety net when .meta is malformed)
             if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
                 auto match = re.match(entry);
                 if (match.hasMatch()) {

@@ -213,7 +213,11 @@ void LocalBackend::scanBackups()
             info.filename = entry;
             info.downloadState = QtCloudBackup::DownloadState::Local;
 
-            // Try to read .meta sidecar (bounded)
+            // Try to read .meta sidecar (bounded). A missing .meta is not
+            // junk — under cloud sync it may be syncing, evicted, or it may
+            // be a stale orphan from an interrupted delete. Surface honestly
+            // via metadataAvailable=false and let the consumer/retention
+            // decide how to treat it.
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
@@ -222,9 +226,12 @@ void LocalBackend::scanBackups()
                 info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
                                                         Qt::ISODateWithMs);
                 info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+            } else {
+                info.metadataAvailable = false;
             }
 
-            // Fallback: parse filename
+            // Fallback: parse filename (always needed when .meta is missing,
+            // and a safety net when .meta is malformed)
             if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
                 auto match = re.match(entry);
                 if (match.hasMatch()) {

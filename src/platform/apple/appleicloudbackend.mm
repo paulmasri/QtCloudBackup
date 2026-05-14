@@ -535,7 +535,9 @@ void AppleICloudBackend::scanBackups()
                     info.downloadState = QtCloudBackup::DownloadState::Downloading;
                 }
 
-                // Try to read .meta sidecar (bounded)
+                // Try to read .meta sidecar (bounded). A missing .meta is
+                // not junk under cloud sync — it may be syncing, evicted, or
+                // a stale orphan. Surface honestly via metadataAvailable=false.
                 QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
                 QFile metaFile(metaPath);
                 if (metaFile.open(QIODevice::ReadOnly)) {
@@ -544,9 +546,12 @@ void AppleICloudBackend::scanBackups()
                     info.timestamp = QDateTime::fromString(
                         meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
                     info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                } else {
+                    info.metadataAvailable = false;
                 }
 
-                // Fallback: parse filename
+                // Fallback: parse filename (always needed when .meta is
+                // missing, and a safety net when .meta is malformed)
                 if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
                     auto match = re.match(entry);
                     if (match.hasMatch()) {
@@ -583,6 +588,11 @@ void AppleICloudBackend::scanBackups()
                         BackupInfo info;
                         info.filename = qName;
                         info.downloadState = QtCloudBackup::DownloadState::CloudOnly;
+                        // Cloud-only: .bak isn't on local disk, so we haven't
+                        // read its .meta sidecar either. Mark as unconfirmed
+                        // so retention excludes from prune candidates until
+                        // a subsequent scan after hydration.
+                        info.metadataAvailable = false;
 
                         // Check download percentage
                         NSNumber *percent = [item valueForAttribute:
@@ -591,7 +601,7 @@ void AppleICloudBackend::scanBackups()
                             info.downloadState = QtCloudBackup::DownloadState::Downloading;
                         }
 
-                        // Parse filename for metadata
+                        // Parse filename for sourceId + timestamp
                         auto match = re.match(qName);
                         if (match.hasMatch()) {
                             info.sourceId = match.captured(1);
