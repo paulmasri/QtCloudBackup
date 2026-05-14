@@ -42,6 +42,13 @@ public:
     Q_INVOKABLE void prune(const QString &sourceId);
     Q_INVOKABLE void checkForOrphanedBackups();
     Q_INVOKABLE void migrateOrphanedBackups();
+    // Factory for constructing a RetentionPolicy from QML. Gadget value types
+    // can't be `new`'d in JS and sub-property assignment goes via a temporary,
+    // so consumers build a full policy and assign it:
+    //   manager.retentionPolicy = manager.makeRetentionPolicy(3, 7, 4, 12, 0)
+    Q_INVOKABLE QtCloudBackup::RetentionPolicy makeRetentionPolicy(
+        int keepLast = 0, int keepDaily = 0, int keepWeekly = 0,
+        int keepMonthly = 0, int keepYearly = 0) const;
 
 signals:
     void storageStatusChanged();

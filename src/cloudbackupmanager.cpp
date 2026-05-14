@@ -280,6 +280,12 @@ void CloudBackupManager::migrateOrphanedBackups()
     m_backend->migrateOrphanedBackups(m_orphanedBackups);
 }
 
+QtCloudBackup::RetentionPolicy CloudBackupManager::makeRetentionPolicy(
+    int keepLast, int keepDaily, int keepWeekly, int keepMonthly, int keepYearly) const
+{
+    return { keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly };
+}
+
 void CloudBackupManager::handleReadFailed(const QString &filename, int error,
                                            const QString &message)
 {
