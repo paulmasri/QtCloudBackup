@@ -83,20 +83,6 @@ std::unique_ptr<CloudBackupBackend> createPlatformBackend()
     return std::make_unique<WindowsOneDriveBackend>();
 }
 
-QString WindowsOneDriveBackend::backupDir() const
-{
-    const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
-    if (relPath.isEmpty())
-        return m_backupRoot;
-    return m_backupRoot + QLatin1Char('/') + relPath;
-}
-
-QString WindowsOneDriveBackend::localFallbackDir() const
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-           + QStringLiteral("/Backups");
-}
-
 void WindowsOneDriveBackend::initialise()
 {
     QPointer<WindowsOneDriveBackend> self(this);
@@ -569,4 +555,18 @@ void WindowsOneDriveBackend::migrateOrphanedBackups(const QList<OrphanedBackupIn
             emit self->migrationCompleted(count, err, msg);
         }, Qt::QueuedConnection);
     });
+}
+
+QString WindowsOneDriveBackend::backupDir() const
+{
+    const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
+    if (relPath.isEmpty())
+        return m_backupRoot;
+    return m_backupRoot + QLatin1Char('/') + relPath;
+}
+
+QString WindowsOneDriveBackend::localFallbackDir() const
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+           + QStringLiteral("/Backups");
 }

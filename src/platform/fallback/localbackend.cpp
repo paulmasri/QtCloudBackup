@@ -23,12 +23,6 @@ std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 
 static constexpr qint64 MaxMetaFileSize = 1024 * 1024; // 1 MB
 
-QString LocalBackend::backupDir() const
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-           + QStringLiteral("/Backups");
-}
-
 void LocalBackend::initialise()
 {
     QString dir = backupDir();
@@ -271,4 +265,10 @@ void LocalBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> &)
 {
     // Nothing to migrate
     emit migrationCompleted(0, int(QtCloudBackup::BackupError::NoError), QString());
+}
+
+QString LocalBackend::backupDir() const
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+           + QStringLiteral("/Backups");
 }

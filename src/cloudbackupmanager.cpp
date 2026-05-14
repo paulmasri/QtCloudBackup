@@ -155,11 +155,9 @@ void CloudBackupManager::setRetentionPolicy(const QtCloudBackup::RetentionPolicy
     emit retentionPolicyChanged();
 }
 
-void CloudBackupManager::prune(const QString &sourceId)
+bool CloudBackupManager::hasOrphanedBackups() const
 {
-    if (sourceId.isEmpty() || !m_backend)
-        return;
-    pruneBackups(sourceId);
+    return !m_orphanedBackups.isEmpty();
 }
 
 void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray &data,
@@ -260,9 +258,11 @@ void CloudBackupManager::refresh()
     m_backend->initialise();
 }
 
-bool CloudBackupManager::hasOrphanedBackups() const
+void CloudBackupManager::prune(const QString &sourceId)
 {
-    return !m_orphanedBackups.isEmpty();
+    if (sourceId.isEmpty() || !m_backend)
+        return;
+    pruneBackups(sourceId);
 }
 
 void CloudBackupManager::checkForOrphanedBackups()
@@ -284,28 +284,6 @@ QtCloudBackup::RetentionPolicy CloudBackupManager::makeRetentionPolicy(
     int keepLast, int keepDaily, int keepWeekly, int keepMonthly, int keepYearly) const
 {
     return { keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly };
-}
-
-void CloudBackupManager::handleReadFailed(const QString &filename, int error,
-                                           const QString &message)
-{
-    // If the file is cloud-only and we haven't already tried downloading,
-    // auto-trigger the download and retry on completion.
-    if (m_pendingRestoreFilename.isEmpty()
-        && error == int(QtCloudBackup::BackupError::FileNotLocal)) {
-        m_pendingRestoreFilename = filename;
-        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreDownloading, {}, {},
-                            int(QtCloudBackup::BackupError::NoError), QString());
-        m_backend->triggerDownload(filename);
-        return;
-    }
-
-    // Either the retry failed or it's a different error — give up
-    m_pendingRestoreFilename.clear();
-    m_backupInProgress = false;
-    emit backupInProgressChanged();
-    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
-                        error, message);
 }
 
 void CloudBackupManager::pruneBackups(const QString &sourceId)
@@ -343,4 +321,26 @@ void CloudBackupManager::pruneBackups(const QString &sourceId)
                     });
 
     m_backend->scanBackups();
+}
+
+void CloudBackupManager::handleReadFailed(const QString &filename, int error,
+                                           const QString &message)
+{
+    // If the file is cloud-only and we haven't already tried downloading,
+    // auto-trigger the download and retry on completion.
+    if (m_pendingRestoreFilename.isEmpty()
+        && error == int(QtCloudBackup::BackupError::FileNotLocal)) {
+        m_pendingRestoreFilename = filename;
+        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreDownloading, {}, {},
+                            int(QtCloudBackup::BackupError::NoError), QString());
+        m_backend->triggerDownload(filename);
+        return;
+    }
+
+    // Either the retry failed or it's a different error — give up
+    m_pendingRestoreFilename.clear();
+    m_backupInProgress = false;
+    emit backupInProgressChanged();
+    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
+                        error, message);
 }
