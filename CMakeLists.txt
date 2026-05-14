@@ -22,6 +22,8 @@ set(SOURCES
     src/backupinfo.h
     src/backupvalidation.h
     src/retentionpolicy.h
+    src/retentionevaluator.h
+    src/retentionevaluator.cpp
     src/platform/fallback/localbackend.h
     src/platform/fallback/localbackend.cpp
 )
@@ -60,6 +62,12 @@ if(APPLE)
     target_link_libraries(QtCloudBackup PRIVATE "-framework Foundation")
 elseif(WIN32)
     target_link_libraries(QtCloudBackup PRIVATE shell32)
+endif()
+
+option(QTCLOUDBACKUP_BUILD_TESTS "Build QtCloudBackup ad-hoc test executables" OFF)
+if(QTCLOUDBACKUP_BUILD_TESTS)
+    qt_add_executable(test_retention tools/test_retention.cpp)
+    target_link_libraries(test_retention PRIVATE QtCloudBackup Qt6::Core)
 endif()
 
 qt_add_qml_module(QtCloudBackup
