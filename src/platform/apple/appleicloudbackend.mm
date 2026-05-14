@@ -447,6 +447,18 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
             __block int errorCode = int(QtCloudBackup::BackupError::NoError);
             __block QString errorMsg;
 
+            // Delete .meta first (the completion marker), then .bak. Mirrors the
+            // write protocol (.bak first, .meta last) and ensures that an
+            // interruption between the two removals leaves an orphan .bak that
+            // the scanner surfaces with metadataAvailable=false, rather than an
+            // invisible orphan .meta.
+            NSError *metaRemoveError = nil;
+            if (![[NSFileManager defaultManager] removeItemAtURL:metaUrl error:&metaRemoveError]
+                && metaRemoveError.code != NSFileNoSuchFileError) {
+                qWarning("Failed to remove metadata sidecar: %s",
+                         qPrintable(QString::fromNSString(metaRemoveError.localizedDescription)));
+            }
+
             NSError *coordError = nil;
             [coordinator coordinateWritingItemAtURL:bakUrl
                                            options:NSFileCoordinatorWritingForDeleting
@@ -466,14 +478,6 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
                 errorCode = int(QtCloudBackup::BackupError::CoordinationFailed);
                 errorMsg = AppleICloudBackend::tr("File coordination failed for delete: %1")
                     .arg(QString::fromNSString(coordError.localizedDescription));
-            }
-
-            // Delete meta sidecar
-            NSError *metaRemoveError = nil;
-            if (![[NSFileManager defaultManager] removeItemAtURL:metaUrl error:&metaRemoveError]
-                && metaRemoveError.code != NSFileNoSuchFileError) {
-                qWarning("Failed to remove metadata sidecar: %s",
-                         qPrintable(QString::fromNSString(metaRemoveError.localizedDescription)));
             }
 
             // Resolve any file version conflicts

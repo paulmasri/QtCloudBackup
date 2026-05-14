@@ -219,10 +219,12 @@ void WindowsOneDriveBackend::writeBackup(const QString &filename, const QByteArr
             }
         }
 
-        // Write .meta file atomically
+        // Write .meta file atomically. On failure, roll back the .bak so the
+        // writer-local invariant (complete backup ⇔ both files exist) holds.
         {
             QSaveFile file(metaPath);
             if (!file.open(QIODevice::WriteOnly)) {
+                QFile::remove(bakPath);
                 QMetaObject::invokeMethod(qApp, [self, filename,
                         msg = WindowsOneDriveBackend::tr("Failed to open metadata file for writing")] {
                     if (!self) return;
@@ -233,6 +235,7 @@ void WindowsOneDriveBackend::writeBackup(const QString &filename, const QByteArr
             }
             file.write(QJsonDocument(meta).toJson(QJsonDocument::Compact));
             if (!file.commit()) {
+                QFile::remove(bakPath);
                 QMetaObject::invokeMethod(qApp, [self, filename,
                         msg = WindowsOneDriveBackend::tr("Failed to write metadata file")] {
                     if (!self) return;
@@ -299,9 +302,14 @@ void WindowsOneDriveBackend::deleteBackup(const QString &filename)
         QString bakPath = dir + QLatin1Char('/') + filename;
         QString metaPath = dir + QLatin1Char('/') + backupStem(filename) + QStringLiteral(".meta");
 
-        bool ok = QFile::remove(bakPath);
+        // Delete .meta first (the completion marker), then .bak. Mirrors the
+        // write protocol: .bak first, .meta last. If interrupted between the
+        // two removals, an orphan .bak is left and the scanner surfaces it
+        // with metadataAvailable=false rather than leaving an invisible
+        // orphan .meta.
         if (!QFile::remove(metaPath) && QFile::exists(metaPath))
             qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
+        bool ok = QFile::remove(bakPath);
 
         int err = ok ? int(QtCloudBackup::BackupError::NoError)
                      : int(QtCloudBackup::BackupError::IOError);
