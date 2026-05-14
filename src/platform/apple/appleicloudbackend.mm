@@ -249,7 +249,7 @@ void AppleICloudBackend::readBackup(const QString &filename)
                                 .arg(QString::fromNSString(dlError.localizedDescription))] {
                         if (!self) return;
                         emit self->readCompleted(filename, {}, {},
-                            int(QtCloudBackup::BackupError::DownloadFailed), msg);
+                            int(QtCloudBackup::BackupError::DownloadError), msg);
                     }, Qt::QueuedConnection);
                 } else {
                     QMetaObject::invokeMethod(qApp, [self, filename,
@@ -538,7 +538,7 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
                 QMetaObject::invokeMethod(qApp, [self, filename, msg] {
                     if (!self) return;
                     emit self->downloadCompleted(filename,
-                        int(QtCloudBackup::BackupError::DownloadFailed), msg);
+                        int(QtCloudBackup::BackupError::DownloadError), msg);
                 }, Qt::QueuedConnection);
                 return;
             }

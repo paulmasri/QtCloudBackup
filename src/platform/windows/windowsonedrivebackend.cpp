@@ -392,7 +392,7 @@ void WindowsOneDriveBackend::triggerDownload(const QString &filename)
             file.close();
 
         int err = ok ? int(QtCloudBackup::BackupError::NoError)
-                     : int(QtCloudBackup::BackupError::DownloadFailed);
+                     : int(QtCloudBackup::BackupError::DownloadError);
         QString msg = ok ? QString() : WindowsOneDriveBackend::tr("Failed to download backup file");
         QMetaObject::invokeMethod(qApp, [self, filename, err, msg] {
             if (!self) return;

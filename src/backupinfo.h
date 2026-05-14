@@ -65,7 +65,7 @@ enum class BackupError {
     MetadataIOError,
     CoordinationFailed,
     FileNotLocal,
-    DownloadFailed,
+    DownloadError,
     DownloadTimeout,
     MigrationPartial,
     UnknownError

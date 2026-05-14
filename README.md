@@ -180,7 +180,7 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 
 **MigrationStatus**: `MigrationInProgress`, `MigrationSucceeded`, `MigrationFailed`
 
-**BackupError**: `NoError`, `InvalidArgument`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadFailed`, `DownloadTimeout`, `MigrationPartial`, `UnknownError`
+**BackupError**: `NoError`, `InvalidArgument`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadError`, `DownloadTimeout`, `MigrationPartial`, `UnknownError`
 
 ### Value types
 
