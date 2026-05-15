@@ -129,46 +129,6 @@ void AppleICloudBackend::detect()
     });
 }
 
-void AppleICloudBackend::applyDetectionResult(QList<DetectedAccount> accounts, int gen)
-{
-    // Generation gate: a fresher detect() has already started; drop this
-    // stale completion to avoid clobbering m_lastDetection / re-emitting
-    // outdated status.
-    if (gen != m_detectionGeneration)
-        return;
-
-    m_lastDetection = accounts;
-
-    // Selection-invalidation: if a previously-selected account is no longer
-    // Ready in the new detection result, tear down the active state and
-    // emit statusChanged so the consumer learns the active target is gone.
-    // Issued BEFORE accountsDetected so the consumer sees "your storage
-    // dropped" before "here are the current options".
-    if (m_selectedId.type != QtCloudBackup::StorageType::None) {
-        const DetectedAccount *selectedNow = nullptr;
-        for (const auto &a : accounts) {
-            if (a.id == m_selectedId) {
-                selectedNow = &a;
-                break;
-            }
-        }
-        const bool stillReady = selectedNow
-            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
-        if (!stillReady) {
-            stopMetadataQuery();
-            m_containerUrl.clear();
-            m_status = selectedNow ? selectedNow->status
-                                   : QtCloudBackup::StorageStatus::Unavailable;
-            m_statusDetail = selectedNow ? selectedNow->statusDetail
-                                         : tr("Previously-selected iCloud account is no longer detected");
-            m_selectedId = {};
-            emit statusChanged(m_status, m_statusDetail);
-        }
-    }
-
-    emit accountsDetected(m_lastDetection);
-}
-
 void AppleICloudBackend::select(const AccountId &id)
 {
     if (id.type != QtCloudBackup::StorageType::ICloud) {
@@ -1045,4 +1005,44 @@ void AppleICloudBackend::handleQueryResults()
         for (const QString &sourceId : sourceIds)
             emit remoteChangeDetected(sourceId);
     }
+}
+
+void AppleICloudBackend::applyDetectionResult(QList<DetectedAccount> accounts, int gen)
+{
+    // Generation gate: a fresher detect() has already started; drop this
+    // stale completion to avoid clobbering m_lastDetection / re-emitting
+    // outdated status.
+    if (gen != m_detectionGeneration)
+        return;
+
+    m_lastDetection = accounts;
+
+    // Selection-invalidation: if a previously-selected account is no longer
+    // Ready in the new detection result, tear down the active state and
+    // emit statusChanged so the consumer learns the active target is gone.
+    // Issued BEFORE accountsDetected so the consumer sees "your storage
+    // dropped" before "here are the current options".
+    if (m_selectedId.type != QtCloudBackup::StorageType::None) {
+        const DetectedAccount *selectedNow = nullptr;
+        for (const auto &a : accounts) {
+            if (a.id == m_selectedId) {
+                selectedNow = &a;
+                break;
+            }
+        }
+        const bool stillReady = selectedNow
+            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
+        if (!stillReady) {
+            stopMetadataQuery();
+            m_containerUrl.clear();
+            m_status = selectedNow ? selectedNow->status
+                                   : QtCloudBackup::StorageStatus::Unavailable;
+            m_statusDetail = selectedNow ? selectedNow->statusDetail
+                                         : tr("Previously-selected iCloud account is no longer detected");
+            m_selectedId = {};
+            emit statusChanged(m_status, m_statusDetail);
+        }
+    }
+
+    emit accountsDetected(m_lastDetection);
 }

@@ -85,46 +85,6 @@ void LocalBackend::detect()
     });
 }
 
-void LocalBackend::applyDetectionResult(QList<DetectedAccount> accounts, int gen)
-{
-    // Staleness gate: a fresher detect() has already started; drop this
-    // stale completion to avoid clobbering m_lastDetection / re-emitting
-    // outdated status.
-    if (gen != m_detectionGeneration)
-        return;
-
-    m_lastDetection = accounts;
-
-    // Selection-invalidation: if a previously-selected account is no longer
-    // Ready in the new detection result, tear down the active state and
-    // emit statusChanged BEFORE accountsDetected so the consumer sees
-    // "your storage dropped" before "here are the current options". Same
-    // pattern as the Apple and Windows backends; for single-account Local
-    // this only fires when the local path becomes non-writable between
-    // detect() calls.
-    if (m_selectedId.type != QtCloudBackup::StorageType::None) {
-        const DetectedAccount *selectedNow = nullptr;
-        for (const auto &a : accounts) {
-            if (a.id == m_selectedId) {
-                selectedNow = &a;
-                break;
-            }
-        }
-        const bool stillReady = selectedNow
-            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
-        if (!stillReady) {
-            m_status = selectedNow ? selectedNow->status
-                                   : QtCloudBackup::StorageStatus::Unavailable;
-            m_statusDetail = selectedNow ? selectedNow->statusDetail
-                                         : tr("Local directory is no longer detected");
-            m_selectedId = {};
-            emit statusChanged(m_status, m_statusDetail);
-        }
-    }
-
-    emit accountsDetected(m_lastDetection);
-}
-
 void LocalBackend::select(const AccountId &id)
 {
     if (id.type != QtCloudBackup::StorageType::LocalDirectory) {
@@ -425,4 +385,44 @@ QString LocalBackend::backupDir() const
 {
     return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
            + QStringLiteral("/Backups");
+}
+
+void LocalBackend::applyDetectionResult(QList<DetectedAccount> accounts, int gen)
+{
+    // Staleness gate: a fresher detect() has already started; drop this
+    // stale completion to avoid clobbering m_lastDetection / re-emitting
+    // outdated status.
+    if (gen != m_detectionGeneration)
+        return;
+
+    m_lastDetection = accounts;
+
+    // Selection-invalidation: if a previously-selected account is no longer
+    // Ready in the new detection result, tear down the active state and
+    // emit statusChanged BEFORE accountsDetected so the consumer sees
+    // "your storage dropped" before "here are the current options". Same
+    // pattern as the Apple and Windows backends; for single-account Local
+    // this only fires when the local path becomes non-writable between
+    // detect() calls.
+    if (m_selectedId.type != QtCloudBackup::StorageType::None) {
+        const DetectedAccount *selectedNow = nullptr;
+        for (const auto &a : accounts) {
+            if (a.id == m_selectedId) {
+                selectedNow = &a;
+                break;
+            }
+        }
+        const bool stillReady = selectedNow
+            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
+        if (!stillReady) {
+            m_status = selectedNow ? selectedNow->status
+                                   : QtCloudBackup::StorageStatus::Unavailable;
+            m_statusDetail = selectedNow ? selectedNow->statusDetail
+                                         : tr("Local directory is no longer detected");
+            m_selectedId = {};
+            emit statusChanged(m_status, m_statusDetail);
+        }
+    }
+
+    emit accountsDetected(m_lastDetection);
 }

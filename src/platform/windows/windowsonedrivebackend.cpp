@@ -272,56 +272,6 @@ void WindowsOneDriveBackend::detect()
     });
 }
 
-void WindowsOneDriveBackend::applyDetectionResult(QList<DetectedAccount> accounts,
-                                                  QMap<QString, QString> userFolders,
-                                                  bool deviceBlocked,
-                                                  QString deviceDetail)
-{
-    m_lastDetection = accounts;
-    m_userFolders = userFolders;
-
-    if (deviceBlocked) {
-        // Device-level GP block trumps everything: the consumer can't pick
-        // any account. Tear down any active selection and emit Disabled.
-        if (m_selectedId.type != QtCloudBackup::StorageType::None
-            || m_status != QtCloudBackup::StorageStatus::Disabled) {
-            m_backupRoot.clear();
-            m_storageType = QtCloudBackup::StorageType::None;
-            m_selectedId = {};
-            m_status = QtCloudBackup::StorageStatus::Disabled;
-            m_statusDetail = deviceDetail;
-            emit statusChanged(m_status, m_statusDetail);
-        }
-    } else if (m_selectedId.type != QtCloudBackup::StorageType::None) {
-        // Selection-invalidation: if the previously-selected account is no
-        // longer Ready in the new detection result, tear down the active
-        // state. statusChanged fires BEFORE accountsDetected so consumers
-        // see "your storage dropped" before "here are the current options".
-        const DetectedAccount *selectedNow = nullptr;
-        for (const auto &a : m_lastDetection) {
-            if (a.id == m_selectedId) {
-                selectedNow = &a;
-                break;
-            }
-        }
-        const bool stillReady = selectedNow
-            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
-        if (!stillReady) {
-            m_backupRoot.clear();
-            m_storageType = QtCloudBackup::StorageType::None;
-            m_status = selectedNow ? selectedNow->status
-                                   : QtCloudBackup::StorageStatus::Unavailable;
-            m_statusDetail = selectedNow
-                ? selectedNow->statusDetail
-                : tr("Previously-selected OneDrive account is no longer detected");
-            m_selectedId = {};
-            emit statusChanged(m_status, m_statusDetail);
-        }
-    }
-
-    emit accountsDetected(m_lastDetection);
-}
-
 void WindowsOneDriveBackend::select(const AccountId &id)
 {
     if (id.type != QtCloudBackup::StorageType::OneDrivePersonal
@@ -834,4 +784,54 @@ QString WindowsOneDriveBackend::localFallbackDir() const
 {
     return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
            + QStringLiteral("/Backups");
+}
+
+void WindowsOneDriveBackend::applyDetectionResult(QList<DetectedAccount> accounts,
+                                                  QMap<QString, QString> userFolders,
+                                                  bool deviceBlocked,
+                                                  QString deviceDetail)
+{
+    m_lastDetection = accounts;
+    m_userFolders = userFolders;
+
+    if (deviceBlocked) {
+        // Device-level GP block trumps everything: the consumer can't pick
+        // any account. Tear down any active selection and emit Disabled.
+        if (m_selectedId.type != QtCloudBackup::StorageType::None
+            || m_status != QtCloudBackup::StorageStatus::Disabled) {
+            m_backupRoot.clear();
+            m_storageType = QtCloudBackup::StorageType::None;
+            m_selectedId = {};
+            m_status = QtCloudBackup::StorageStatus::Disabled;
+            m_statusDetail = deviceDetail;
+            emit statusChanged(m_status, m_statusDetail);
+        }
+    } else if (m_selectedId.type != QtCloudBackup::StorageType::None) {
+        // Selection-invalidation: if the previously-selected account is no
+        // longer Ready in the new detection result, tear down the active
+        // state. statusChanged fires BEFORE accountsDetected so consumers
+        // see "your storage dropped" before "here are the current options".
+        const DetectedAccount *selectedNow = nullptr;
+        for (const auto &a : m_lastDetection) {
+            if (a.id == m_selectedId) {
+                selectedNow = &a;
+                break;
+            }
+        }
+        const bool stillReady = selectedNow
+            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
+        if (!stillReady) {
+            m_backupRoot.clear();
+            m_storageType = QtCloudBackup::StorageType::None;
+            m_status = selectedNow ? selectedNow->status
+                                   : QtCloudBackup::StorageStatus::Unavailable;
+            m_statusDetail = selectedNow
+                ? selectedNow->statusDetail
+                : tr("Previously-selected OneDrive account is no longer detected");
+            m_selectedId = {};
+            emit statusChanged(m_status, m_statusDetail);
+        }
+    }
+
+    emit accountsDetected(m_lastDetection);
 }
