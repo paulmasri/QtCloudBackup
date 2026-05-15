@@ -84,43 +84,6 @@ std::unique_ptr<CloudBackupBackend> createPlatformBackend()
     return std::make_unique<WindowsOneDriveBackend>();
 }
 
-void WindowsOneDriveBackend::initialise()
-{
-    // Transitional shim during issue #4 — wires the legacy single-call
-    // initialise() onto the new detect()/select() flow. Removed in phase 6
-    // when CloudBackupManager switches to driving detect/select directly.
-    auto conn = std::make_shared<QMetaObject::Connection>();
-    *conn = connect(this, &CloudBackupBackend::accountsDetected, this,
-        [this, conn](const QList<DetectedAccount> &accounts) {
-            QObject::disconnect(*conn);
-            // Pick the first Ready account (Personal preferred over Business
-            // is no longer the library's call — but for the legacy shim we
-            // just pick the first available match to keep behaviour stable).
-            for (const auto &a : accounts) {
-                if (a.status == QtCloudBackup::StorageStatus::Ready) {
-                    select(a.id);
-                    return;
-                }
-            }
-            // No Ready account. The applyDetectionResult invalidation path
-            // already emitted statusChanged with appropriate detail for the
-            // backend-level case (device GP block). For per-account failures
-            // with no prior selection, surface the first account's status
-            // so the consumer learns why nothing is usable.
-            if (m_status != QtCloudBackup::StorageStatus::Disabled) {
-                if (!accounts.isEmpty()) {
-                    m_status = accounts.first().status;
-                    m_statusDetail = accounts.first().statusDetail;
-                } else {
-                    m_status = QtCloudBackup::StorageStatus::Unavailable;
-                    m_statusDetail = tr("No OneDrive accounts found");
-                }
-                emit statusChanged(m_status, m_statusDetail);
-            }
-        });
-    detect();
-}
-
 void WindowsOneDriveBackend::detect()
 {
     const int gen = ++m_detectionGeneration;

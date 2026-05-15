@@ -13,11 +13,6 @@ public:
     using QObject::QObject;
     virtual ~CloudBackupBackend() = default;
 
-    // Transitional during issue #4 work: `initialise()` will be removed once
-    // every backend implements `detect()`/`select()` (phase 6). For now both
-    // paths coexist so the build stays green between phases.
-    virtual void initialise() = 0;
-
     // Stage 1: enumerate candidate accounts. No filesystem side effects — no
     // writes, no folder creation. Async; result delivered via
     // `accountsDetected`. Implementations cache the result internally for use

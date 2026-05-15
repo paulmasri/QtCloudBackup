@@ -7,7 +7,6 @@ class LocalBackend : public CloudBackupBackend {
 public:
     using CloudBackupBackend::CloudBackupBackend;
 
-    void initialise() override;
     void detect() override;
     void select(const AccountId &id) override;
     std::optional<AccountId> resolveAccount(QtCloudBackup::StorageType type,

@@ -17,6 +17,9 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     : QObject(parent)
     , m_backend(createPlatformBackend())
 {
+    connect(m_backend.get(), &CloudBackupBackend::accountsDetected, this,
+            &CloudBackupManager::accountsDetected);
+
     connect(m_backend.get(), &CloudBackupBackend::statusChanged, this,
             [this](QtCloudBackup::StorageStatus status, const QString &detail) {
                 emit storageStatusChanged();
@@ -121,7 +124,10 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
                 emit migrationUpdated(status, migratedCount, total, error, message);
             });
 
-    m_backend->initialise();
+    // No auto-init: the consumer drives lifecycle explicitly via detect() →
+    // select() (or resolveAccount() → select() against a persisted identity).
+    // Side-effect-free construction so the consumer can wire all signal
+    // connections before any state-change events are emitted.
 }
 
 CloudBackupManager::~CloudBackupManager() = default;
@@ -257,9 +263,27 @@ void CloudBackupManager::deleteBackup(const QString &filename)
     m_backend->deleteBackup(filename);
 }
 
-void CloudBackupManager::refresh()
+void CloudBackupManager::detect()
 {
-    m_backend->initialise();
+    m_backend->detect();
+}
+
+void CloudBackupManager::select(QtCloudBackup::StorageType type, const QString &accountKey)
+{
+    m_backend->select({ type, accountKey });
+}
+
+QVariantMap CloudBackupManager::resolveAccount(QtCloudBackup::StorageType type,
+                                               const QString &tenantId,
+                                               const QString &email) const
+{
+    const auto id = m_backend->resolveAccount(type, tenantId, email);
+    if (!id)
+        return {};
+    return {
+        { QStringLiteral("type"), int(id->type) },
+        { QStringLiteral("accountKey"), id->accountKey },
+    };
 }
 
 void CloudBackupManager::prune(const QString &sourceId)

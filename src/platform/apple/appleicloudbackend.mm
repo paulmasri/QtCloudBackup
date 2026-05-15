@@ -40,29 +40,6 @@ AppleICloudBackend::~AppleICloudBackend()
     }
 }
 
-void AppleICloudBackend::initialise()
-{
-    // Transitional shim during issue #4 — wires the legacy single-call
-    // initialise() onto the new detect()/select() flow. Removed in phase 6
-    // when CloudBackupManager switches to driving detect/select directly.
-    auto conn = std::make_shared<QMetaObject::Connection>();
-    *conn = connect(this, &CloudBackupBackend::accountsDetected, this,
-        [this, conn](const QList<DetectedAccount> &accounts) {
-            QObject::disconnect(*conn);
-            if (accounts.isEmpty()) return;
-            const auto &a = accounts.first();
-            if (a.status == QtCloudBackup::StorageStatus::Ready) {
-                select(a.id);
-            } else {
-                m_status = a.status;
-                m_statusDetail = a.statusDetail;
-                stopMetadataQuery();
-                emit statusChanged(m_status, m_statusDetail);
-            }
-        });
-    detect();
-}
-
 void AppleICloudBackend::detect()
 {
     // Install the NSUbiquityIdentityDidChangeNotification observer once.
