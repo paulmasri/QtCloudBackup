@@ -719,65 +719,17 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
 
 void AppleICloudBackend::scanOrphanedBackups()
 {
-    QString fallbackDir = localFallbackDir();
-    QPointer<AppleICloudBackend> self(this);
-    (void)QtConcurrent::run([self, fallbackDir] {
-        @autoreleasepool {
-            QList<OrphanedBackupInfo> orphans;
-
-            QDir d(fallbackDir);
-            if (!d.exists()) {
-                QMetaObject::invokeMethod(qApp, [self, orphans] {
-                    if (!self) return;
-                    emit self->orphanScanCompleted(orphans);
-                }, Qt::QueuedConnection);
-                return;
-            }
-
-            QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
-                                              QDir::Files, QDir::Name);
-
-            static const QRegularExpression re(
-                QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
-
-            for (const QString &entry : entries) {
-                OrphanedBackupInfo info;
-                info.filename = entry;
-                info.originStorageType = QtCloudBackup::StorageType::LocalDirectory;
-                info.originPath = fallbackDir;
-
-                // Try to read .meta sidecar
-                QString metaPath = fallbackDir + QLatin1Char('/') + backupStem(entry)
-                                   + QStringLiteral(".meta");
-                QFile metaFile(metaPath);
-                if (metaFile.open(QIODevice::ReadOnly)) {
-                    QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
-                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                    info.timestamp = QDateTime::fromString(
-                        meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
-                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
-                }
-
-                // Fallback: parse filename
-                if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
-                    auto match = re.match(entry);
-                    if (match.hasMatch()) {
-                        info.sourceId = match.captured(1);
-                        info.timestamp = QDateTime::fromString(
-                            match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
-                        info.timestamp.setTimeZone(QTimeZone::utc());
-                    }
-                }
-
-                orphans.append(info);
-            }
-
-            QMetaObject::invokeMethod(qApp, [self, orphans] {
-                if (!self) return;
-                emit self->orphanScanCompleted(orphans);
-            }, Qt::QueuedConnection);
-        }
-    });
+    // Orphan sources = detected accounts minus the selected one. Apple builds
+    // currently expose exactly one DetectedAccount per platform (iCloud), so
+    // the result is always an empty list. If/when multi-backend builds land
+    // (e.g. iCloud + Local in one binary), this iteration picks up any
+    // additional non-selected Ready accounts automatically.
+    if (m_selectedId.type == QtCloudBackup::StorageType::None) {
+        qWarning("scanOrphanedBackups() called before select() — returning empty list");
+        emit orphanScanCompleted({});
+        return;
+    }
+    emit orphanScanCompleted({});
 }
 
 void AppleICloudBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> &orphans)
@@ -882,12 +834,6 @@ void AppleICloudBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> 
 QString AppleICloudBackend::backupDir() const
 {
     return m_containerUrl.toLocalFile();
-}
-
-QString AppleICloudBackend::localFallbackDir() const
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-           + QStringLiteral("/Backups");
 }
 
 // --- NSMetadataQuery for file discovery and remote change detection ---

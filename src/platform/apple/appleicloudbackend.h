@@ -40,7 +40,6 @@ public:
 
 private:
     QString backupDir() const;
-    QString localFallbackDir() const;
     void startMetadataQuery();
     void stopMetadataQuery();
     void handleQueryResults();

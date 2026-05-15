@@ -28,7 +28,6 @@ public:
 
 private:
     QString backupDir() const;
-    QString localFallbackDir() const;
     void applyDetectionResult(QList<DetectedAccount> accounts,
                               QMap<QString, QString> userFolders,
                               bool deviceBlocked,

@@ -74,8 +74,6 @@ target_compile_definitions(QtCloudBackup PRIVATE
 
 if(APPLE)
     target_link_libraries(QtCloudBackup PRIVATE "-framework Foundation")
-elseif(WIN32)
-    target_link_libraries(QtCloudBackup PRIVATE shell32)
 endif()
 
 option(QTCLOUDBACKUP_BUILD_TESTS "Build QtCloudBackup ad-hoc test executables" OFF)

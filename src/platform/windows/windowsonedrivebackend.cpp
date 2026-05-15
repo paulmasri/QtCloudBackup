@@ -16,68 +16,12 @@
 #include <QtConcurrent>
 
 #include <qt_windows.h>
-#include <shlobj.h>
 
 #ifndef QTCLOUDBACKUP_WINDOWS_BACKUP_PATH
 #define QTCLOUDBACKUP_WINDOWS_BACKUP_PATH ""
 #endif
 
 static constexpr qint64 MaxMetaFileSize = 1024 * 1024; // 1 MB
-
-struct OneDriveCandidate {
-    QString path;
-    QtCloudBackup::StorageType type;
-};
-
-static QList<OneDriveCandidate> detectOneDriveCandidates()
-{
-    QList<OneDriveCandidate> candidates;
-
-    // 1. %OneDriveCommercial%
-    QString val = qEnvironmentVariable("OneDriveCommercial");
-    if (!val.isEmpty())
-        candidates.append({val, QtCloudBackup::StorageType::OneDriveCommercial});
-
-    // 2. Registry Business1
-    {
-        QSettings reg(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\OneDrive\\Accounts\\Business1"),
-                       QSettings::NativeFormat);
-        val = reg.value(QStringLiteral("UserFolder")).toString();
-        if (!val.isEmpty())
-            candidates.append({val, QtCloudBackup::StorageType::OneDriveCommercial});
-    }
-
-    // 3. %OneDriveConsumer%
-    val = qEnvironmentVariable("OneDriveConsumer");
-    if (!val.isEmpty())
-        candidates.append({val, QtCloudBackup::StorageType::OneDrivePersonal});
-
-    // 4. Registry Personal
-    {
-        QSettings reg(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\OneDrive\\Accounts\\Personal"),
-                       QSettings::NativeFormat);
-        val = reg.value(QStringLiteral("UserFolder")).toString();
-        if (!val.isEmpty())
-            candidates.append({val, QtCloudBackup::StorageType::OneDrivePersonal});
-    }
-
-    // 5. %OneDrive% (assume personal)
-    val = qEnvironmentVariable("OneDrive");
-    if (!val.isEmpty())
-        candidates.append({val, QtCloudBackup::StorageType::OneDrivePersonal});
-
-    // 6. Documents folder fallback via SHGetKnownFolderPath
-    {
-        PWSTR path = nullptr;
-        HRESULT hr = SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &path);
-        if (SUCCEEDED(hr) && path) {
-            candidates.append({QString::fromWCharArray(path), QtCloudBackup::StorageType::LocalDirectory});
-            CoTaskMemFree(path);
-        }
-    }
-
-    return candidates;
-}
 
 std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 {
@@ -583,70 +527,65 @@ void WindowsOneDriveBackend::triggerDownload(const QString &filename)
 
 void WindowsOneDriveBackend::scanOrphanedBackups()
 {
-    QString activeRoot = m_backupRoot;
-    auto activeType = m_storageType;
+    // Precondition: select() must have been called. Orphans are defined
+    // relative to the migration target, so without a selection there's
+    // nothing to be orphaned from.
+    if (m_selectedId.type == QtCloudBackup::StorageType::None) {
+        qWarning("scanOrphanedBackups() called before select() — returning empty list");
+        emit orphanScanCompleted({});
+        return;
+    }
+
+    // Build the list of orphan sources on the main thread (snapshot of the
+    // cached detection result minus the selected account, skipping accounts
+    // that aren't accessible — orphans can only be discovered from Ready
+    // ones). Then hand the resulting paths to a worker for the actual
+    // filesystem scan.
+    const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
+    struct Source {
+        QString scanDir;
+        QtCloudBackup::StorageType type;
+    };
+    QList<Source> sources;
+    for (const auto &a : m_lastDetection) {
+        if (a.id == m_selectedId)
+            continue;
+        if (a.status != QtCloudBackup::StorageStatus::Ready)
+            continue; // Disabled/Unavailable accounts aren't accessible
+        const QString userFolder = m_userFolders.value(a.id.accountKey);
+        if (userFolder.isEmpty())
+            continue;
+        const QString scanDir = relPath.isEmpty()
+            ? userFolder
+            : userFolder + QLatin1Char('/') + relPath;
+        sources.append({ scanDir, a.id.type });
+    }
+
     QPointer<WindowsOneDriveBackend> self(this);
-    (void)QtConcurrent::run([self, activeRoot, activeType] {
-        auto candidates = detectOneDriveCandidates();
-
-        // Find index of active candidate
-        int activeIdx = -1;
-        for (int i = 0; i < candidates.size(); ++i) {
-            if (candidates[i].path == activeRoot) {
-                activeIdx = i;
-                break;
-            }
-        }
-
-        // Scan candidates after the active one (lower priority), deduplicating paths
-        QSet<QString> seenPaths;
-        if (activeIdx >= 0)
-            seenPaths.insert(QDir(activeRoot).canonicalPath());
-
-        // Build list of full scan directories (with QTCLOUDBACKUP_WINDOWS_BACKUP_PATH applied)
-        const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
-        QList<QPair<QString, QtCloudBackup::StorageType>> dirsToScan;
-        if (activeIdx >= 0) {
-            for (int i = activeIdx + 1; i < candidates.size(); ++i) {
-                QString canonical = QDir(candidates[i].path).canonicalPath();
-                if (canonical.isEmpty() || seenPaths.contains(canonical))
-                    continue;
-                seenPaths.insert(canonical);
-                QString scanDir = relPath.isEmpty() ? candidates[i].path
-                                                    : candidates[i].path + QLatin1Char('/') + relPath;
-                dirsToScan.append({scanDir, candidates[i].type});
-            }
-        }
-
-        // Always include local fallback (already a complete path — no relPath appended)
-        QString fallback = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-                           + QStringLiteral("/Backups");
-        QString fallbackCanonical = QDir(fallback).canonicalPath();
-        if (!fallbackCanonical.isEmpty() && !seenPaths.contains(fallbackCanonical))
-            dirsToScan.append({fallback, QtCloudBackup::StorageType::LocalDirectory});
-
+    (void)QtConcurrent::run([self, sources] {
         static const QRegularExpression re(
             QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
 
         QList<OrphanedBackupInfo> orphans;
-        for (const auto &[scanDir, storType] : dirsToScan) {
-            QDir d(scanDir);
+        for (const auto &src : sources) {
+            QDir d(src.scanDir);
             if (!d.exists())
                 continue;
 
-            QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
-                                              QDir::Files, QDir::Name);
+            const QStringList entries = d.entryList({ QStringLiteral("qtcloudbackup_*.bak") },
+                                                    QDir::Files, QDir::Name);
             for (const QString &entry : entries) {
                 OrphanedBackupInfo info;
                 info.filename = entry;
-                info.originStorageType = storType;
-                info.originPath = scanDir;
+                info.originStorageType = src.type;
+                info.originPath = src.scanDir;
 
-                QString metaPath = scanDir + QLatin1Char('/') + backupStem(entry)
-                                   + QStringLiteral(".meta");
+                const QString metaPath = src.scanDir + QLatin1Char('/')
+                    + backupStem(entry) + QStringLiteral(".meta");
                 QFile metaFile(metaPath);
                 if (metaFile.open(QIODevice::ReadOnly)) {
-                    QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
+                    const QJsonObject meta =
+                        QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
                     info.sourceId = meta[QStringLiteral("sourceId")].toString();
                     info.timestamp = QDateTime::fromString(
                         meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
@@ -654,7 +593,7 @@ void WindowsOneDriveBackend::scanOrphanedBackups()
                 }
 
                 if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
-                    auto match = re.match(entry);
+                    const auto match = re.match(entry);
                     if (match.hasMatch()) {
                         info.sourceId = match.captured(1);
                         info.timestamp = QDateTime::fromString(
@@ -741,12 +680,6 @@ QString WindowsOneDriveBackend::backupDir() const
     if (relPath.isEmpty())
         return m_backupRoot;
     return m_backupRoot + QLatin1Char('/') + relPath;
-}
-
-QString WindowsOneDriveBackend::localFallbackDir() const
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-           + QStringLiteral("/Backups");
 }
 
 void WindowsOneDriveBackend::applyDetectionResult(QList<DetectedAccount> accounts,

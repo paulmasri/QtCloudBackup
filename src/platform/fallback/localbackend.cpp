@@ -349,7 +349,16 @@ void LocalBackend::triggerDownload(const QString &filename)
 
 void LocalBackend::scanOrphanedBackups()
 {
-    // Nothing below local — no orphans possible
+    // Orphan sources = detected accounts minus the selected one. Local
+    // exposes exactly one DetectedAccount (the local directory itself), so
+    // the result is always an empty list. If/when multi-backend builds land
+    // and Local coexists with another backend, this iteration picks up any
+    // additional non-selected Ready accounts automatically.
+    if (m_selectedId.type == QtCloudBackup::StorageType::None) {
+        qWarning("scanOrphanedBackups() called before select() — returning empty list");
+        emit orphanScanCompleted({});
+        return;
+    }
     emit orphanScanCompleted({});
 }
 
