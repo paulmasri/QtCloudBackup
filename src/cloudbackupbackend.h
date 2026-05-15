@@ -18,10 +18,24 @@ public:
     // paths coexist so the build stays green between phases.
     virtual void initialise() = 0;
 
-    // Stage 1: enumerate candidate accounts. Side-effect-free — no filesystem
+    // Stage 1: enumerate candidate accounts. No filesystem side effects — no
     // writes, no folder creation. Async; result delivered via
     // `accountsDetected`. Implementations cache the result internally for use
     // by `select()`, `resolveAccount()`, and `scanOrphanedBackups()`.
+    //
+    // May also emit `statusChanged` as a side effect: if a previously-
+    // selected account is no longer `Ready` in the new detection result,
+    // the active selection is invalidated (platform machinery torn down,
+    // `storageStatus()` reflects the new reality). This keeps the backend
+    // honest when external events (user signs out, IT policy changes, etc.)
+    // make the active target unusable. The `statusChanged` signal is
+    // emitted BEFORE `accountsDetected` so consumers see "storage dropped"
+    // before "here are the current options".
+    //
+    // May be triggered internally by platform notifications (e.g. iCloud's
+    // NSUbiquityIdentityDidChangeNotification) — consumers therefore receive
+    // `accountsDetected` and `statusChanged` events at any time, not only in
+    // direct response to their own `detect()` / `select()` calls.
     virtual void detect() = 0;
 
     // Stage 2: activate the chosen account. Performs `mkpath` of the backup
@@ -31,6 +45,10 @@ public:
     // the active target without tearing down the backend object. Switching
     // does NOT migrate existing backups; that remains an explicit
     // `OrphanedBackupInfo` flow.
+    //
+    // A `Ready` outcome is not permanent. External events (user signs out,
+    // policy change, network identity loss) can invalidate the selection
+    // later — see `detect()` and the `statusChanged` signal.
     virtual void select(const AccountId &id) = 0;
 
     // Synchronous resolver over the cached `detect()` result. Returns the
@@ -58,6 +76,13 @@ public:
 
 signals:
     void accountsDetected(const QList<DetectedAccount> &accounts);
+    // Fires whenever the active target's status changes — from `select()`
+    // completion (success or failure), from `detect()`-driven invalidation
+    // (a previously-selected account is no longer Ready), and from
+    // platform-event-driven re-detection. Consumers must connect once at
+    // startup and tolerate events at any time, not just after a `select()`.
+    // In-flight file operations may complete with errors after an
+    // invalidating `statusChanged` — surface those as errors, not panics.
     void statusChanged(QtCloudBackup::StorageStatus status, const QString &detail);
     void writeCompleted(const QString &filename, int error, const QString &message);
     void readCompleted(const QString &filename, const QByteArray &data, const QJsonObject &meta,
