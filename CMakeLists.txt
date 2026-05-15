@@ -15,6 +15,20 @@ set(QTCLOUDBACKUP_APP_NAME "QtCloudBackup" CACHE STRING "App name for QtCloudBac
 set(QTCLOUDBACKUP_ICLOUD_CONTAINER "" CACHE STRING "iCloud container identifier")
 set(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH "" CACHE STRING "Relative path within OneDrive for backups")
 
+# OneDrive's "Personal Vault" is a locked virtual folder; writes fail while
+# it is locked. The configured subfolder must not collide with it. This is a
+# compile-time value set by the consuming app's build, so catch the mistake
+# here rather than at runtime — by the time the backend notices, the binary
+# has already shipped. Generally the subfolder should be a unique
+# app-namespaced name.
+if(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH STREQUAL "Personal Vault")
+    message(FATAL_ERROR
+        "QTCLOUDBACKUP_WINDOWS_BACKUP_PATH must not be 'Personal Vault' — "
+        "this collides with OneDrive's locked virtual folder and writes "
+        "will fail when the vault is locked. Choose a unique app-namespaced "
+        "subfolder name.")
+endif()
+
 set(SOURCES
     src/cloudbackupmanager.h
     src/cloudbackupmanager.cpp
