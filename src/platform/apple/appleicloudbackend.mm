@@ -88,7 +88,9 @@ void AppleICloudBackend::detect()
     if (!token) {
         DetectedAccount a;
         a.id = { QtCloudBackup::StorageType::ICloud, QString() };
-        a.displayName = tr("iCloud Drive");
+        // displayName is left empty: id.type uniquely identifies this as
+        // iCloud, so the consumer composes the full label (e.g.
+        // "iCloud Drive") itself. See DetectedAccount::displayName docs.
         a.status = QtCloudBackup::StorageStatus::Unavailable;
         a.statusDetail = tr("iCloud not signed in or iCloud Drive disabled");
         m_pendingContainerRoot.clear();
@@ -110,7 +112,7 @@ void AppleICloudBackend::detect()
                 if (!self) return;
                 DetectedAccount a;
                 a.id = { QtCloudBackup::StorageType::ICloud, QString() };
-                a.displayName = AppleICloudBackend::tr("iCloud Drive");
+                // displayName intentionally empty — see other branch.
                 if (rootPath.isEmpty()) {
                     self->m_pendingContainerRoot.clear();
                     a.status = QtCloudBackup::StorageStatus::Disabled;

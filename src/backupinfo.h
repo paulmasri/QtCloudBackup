@@ -145,6 +145,40 @@ Q_DECLARE_METATYPE(AccountId)
 // returns one. `status` reflects whether the account is selectable
 // (`Ready`), needs user remediation (`Unavailable`), or is blocked outside
 // the user's control (`Disabled`) — see the `StorageStatus` doc comment.
+//
+// Field semantics:
+//
+//   id          Stage-2 handle to pass back to `select()`.
+//
+//   displayName The most natural per-account label the platform provides.
+//               For Windows OneDrive it is the on-disk folder basename as
+//               Windows itself names it — i.e. what File Explorer's nav
+//               pane shows: typically "OneDrive" for Personal and
+//               "OneDrive - <org>" (e.g. "OneDrive - Contoso") for
+//               Business. Renderable verbatim where Windows's naming
+//               suffices (Business) and overridable where it doesn't
+//               (Personal: the bare "OneDrive" doesn't distinguish it in a
+//               multi-account picker). Empty for backends with no folder
+//               concept (Apple, Local) — the consumer composes the full
+//               label from `id.type` instead. The library deliberately
+//               does NOT prefix / strip / translate this string: the
+//               consumer owns capitalisation, translation, and surrounding
+//               chrome.
+//
+//   email       Account email, where applicable. Empty for Apple (CloudKit
+//               not in scope) and Local. Part of the durable identity for
+//               OneDrive accounts.
+//
+//   tenantId    Microsoft Entra tenant GUID for OneDrive Business; empty
+//               for Personal / Apple / Local. Part of the durable identity
+//               for Business accounts.
+//
+//   status      Whether this row is selectable (Ready), needs user
+//               remediation (Unavailable), or is blocked outside the user's
+//               control (Disabled).
+//
+//   statusDetail Human-readable detail explaining the status; suitable for
+//               showing as an inline note or tooltip on disabled rows.
 class DetectedAccount {
     Q_GADGET
     Q_PROPERTY(AccountId id MEMBER id)

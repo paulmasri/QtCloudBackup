@@ -3,6 +3,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -85,93 +86,339 @@ std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 
 void WindowsOneDriveBackend::initialise()
 {
-    QPointer<WindowsOneDriveBackend> self(this);
-    (void)QtConcurrent::run([self] {
-        auto candidates = detectOneDriveCandidates();
-
-        QString chosenRoot;
-        auto chosenType = QtCloudBackup::StorageType::None;
-
-        for (const auto &c : candidates) {
-            if (QDir(c.path).exists()) {
-                chosenRoot = c.path;
-                chosenType = c.type;
-                break;
+    // Transitional shim during issue #4 — wires the legacy single-call
+    // initialise() onto the new detect()/select() flow. Removed in phase 6
+    // when CloudBackupManager switches to driving detect/select directly.
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(this, &CloudBackupBackend::accountsDetected, this,
+        [this, conn](const QList<DetectedAccount> &accounts) {
+            QObject::disconnect(*conn);
+            // Pick the first Ready account (Personal preferred over Business
+            // is no longer the library's call — but for the legacy shim we
+            // just pick the first available match to keep behaviour stable).
+            for (const auto &a : accounts) {
+                if (a.status == QtCloudBackup::StorageStatus::Ready) {
+                    select(a.id);
+                    return;
+                }
             }
-        }
-
-        if (chosenRoot.isEmpty()) {
-            QMetaObject::invokeMethod(qApp, [self] {
-                if (!self) return;
-                self->m_status = QtCloudBackup::StorageStatus::Unavailable;
-                self->m_statusDetail = WindowsOneDriveBackend::tr("No OneDrive or Documents folder found");
-                self->m_storageType = QtCloudBackup::StorageType::None;
-                emit self->statusChanged(self->m_status, self->m_statusDetail);
-            }, Qt::QueuedConnection);
-            return;
-        }
-
-        // Ensure backup subdirectory exists
-        const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
-        QString fullDir = relPath.isEmpty() ? chosenRoot : chosenRoot + QLatin1Char('/') + relPath;
-        QDir dir(fullDir);
-        bool ok = dir.exists() || dir.mkpath(QStringLiteral("."));
-
-        auto status = QtCloudBackup::StorageStatus::Unavailable;
-        QString detail;
-
-        if (!ok) {
-            detail = WindowsOneDriveBackend::tr("Failed to create backup directory");
-        } else {
-            switch (chosenType) {
-            case QtCloudBackup::StorageType::OneDriveCommercial:
-                status = QtCloudBackup::StorageStatus::Ready;
-                detail = WindowsOneDriveBackend::tr("Using OneDrive for Business");
-                break;
-            case QtCloudBackup::StorageType::OneDrivePersonal:
-                status = QtCloudBackup::StorageStatus::Ready;
-                detail = WindowsOneDriveBackend::tr("Using OneDrive");
-                break;
-            case QtCloudBackup::StorageType::LocalDirectory:
-                status = QtCloudBackup::StorageStatus::LocalFallback;
-                detail = WindowsOneDriveBackend::tr("Using local Documents folder");
-                break;
-            default:
-                status = QtCloudBackup::StorageStatus::LocalFallback;
-                detail = WindowsOneDriveBackend::tr("Using local storage");
-                break;
+            // No Ready account. The applyDetectionResult invalidation path
+            // already emitted statusChanged with appropriate detail for the
+            // backend-level case (device GP block). For per-account failures
+            // with no prior selection, surface the first account's status
+            // so the consumer learns why nothing is usable.
+            if (m_status != QtCloudBackup::StorageStatus::Disabled) {
+                if (!accounts.isEmpty()) {
+                    m_status = accounts.first().status;
+                    m_statusDetail = accounts.first().statusDetail;
+                } else {
+                    m_status = QtCloudBackup::StorageStatus::Unavailable;
+                    m_statusDetail = tr("No OneDrive accounts found");
+                }
+                emit statusChanged(m_status, m_statusDetail);
             }
-        }
-
-        auto finalType = ok ? chosenType : QtCloudBackup::StorageType::None;
-        auto finalRoot = ok ? chosenRoot : QString();
-
-        QMetaObject::invokeMethod(qApp, [self, status, detail, finalType, finalRoot] {
-            if (!self) return;
-            self->m_backupRoot = finalRoot;
-            self->m_status = status;
-            self->m_statusDetail = detail;
-            self->m_storageType = finalType;
-            emit self->statusChanged(self->m_status, self->m_statusDetail);
-        }, Qt::QueuedConnection);
-    });
+        });
+    detect();
 }
 
 void WindowsOneDriveBackend::detect()
 {
-    // Real implementation lands in phase 4.
+    const int gen = ++m_detectionGeneration;
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, gen] {
+        // 1. Device-level Group Policy: HKLM\SOFTWARE\Policies\Microsoft\
+        //    Windows\OneDrive\DisableFileSyncNGSC (REG_DWORD). Note the
+        //    `Windows\` segment — distinct from the per-account-policy root
+        //    HKLM\SOFTWARE\Policies\Microsoft\OneDrive\ (no `Windows\`).
+        //    Easy to confuse, often is.
+        QSettings devicePolicy(
+            QStringLiteral(R"(HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\OneDrive)"),
+            QSettings::NativeFormat);
+        const bool deviceBlocked =
+            devicePolicy.value(QStringLiteral("DisableFileSyncNGSC"), 0).toInt() == 1;
+
+        QList<DetectedAccount> accounts;
+        QMap<QString, QString> userFolders;
+        QString deviceDetail;
+
+        if (deviceBlocked) {
+            deviceDetail = WindowsOneDriveBackend::tr(
+                "OneDrive is disabled by your organisation's policy");
+        } else {
+            // 2. Per-account GP precompute (the OTHER policy root — no
+            //    `Windows\` segment). Personal sync block can be set under
+            //    HKCU or HKLM; either is sufficient.
+            QSettings policyHkcu(
+                QStringLiteral(R"(HKEY_CURRENT_USER\SOFTWARE\Policies\Microsoft\OneDrive)"),
+                QSettings::NativeFormat);
+            QSettings policyHklm(
+                QStringLiteral(R"(HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\OneDrive)"),
+                QSettings::NativeFormat);
+            const bool personalSyncDisabled =
+                policyHkcu.value(QStringLiteral("DisablePersonalSync"), 0).toInt() == 1
+                || policyHklm.value(QStringLiteral("DisablePersonalSync"), 0).toInt() == 1;
+
+            // AllowTenantList / BlockTenantList are keys whose VALUES (not
+            // subkeys) name tenant GUIDs. Enumerate via childKeys().
+            // AllowTenantList takes precedence over BlockTenantList per
+            // Microsoft docs. Applies to Business accounts only (Personal
+            // MSAs have no tenant).
+            QSettings allowList(
+                QStringLiteral(R"(HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\OneDrive\AllowTenantList)"),
+                QSettings::NativeFormat);
+            QSettings blockList(
+                QStringLiteral(R"(HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\OneDrive\BlockTenantList)"),
+                QSettings::NativeFormat);
+            const QStringList allowed = allowList.childKeys();
+            const QStringList blocked = blockList.childKeys();
+
+            // 3. Enumerate configured accounts. Business numbering can have
+            //    gaps (Business1, Business3 if accounts removed and re-added)
+            //    so we scan rather than assume contiguity. Devices with no
+            //    OneDrive client installed (Win 10 IoT etc.) have no Accounts
+            //    key at all — childGroups() returns empty, accounts stays
+            //    empty, no statusChanged at backend level. The consumer sees
+            //    an empty DetectedAccount list, which maps to the same user
+            //    remediation as "signed out": set up OneDrive (or pick local).
+            QSettings accountsKey(
+                QStringLiteral(R"(HKEY_CURRENT_USER\Software\Microsoft\OneDrive\Accounts)"),
+                QSettings::NativeFormat);
+            const QStringList childKeys = accountsKey.childGroups();
+            for (const QString &key : childKeys) {
+                const bool isPersonal = (key == QLatin1String("Personal"));
+                const bool isBusiness = key.startsWith(QLatin1String("Business"));
+                if (!isPersonal && !isBusiness)
+                    continue; // Skip unknown subkeys (e.g. "Common")
+
+                QSettings acc(QStringLiteral(R"(HKEY_CURRENT_USER\Software\Microsoft\OneDrive\Accounts\)")
+                                  + key,
+                              QSettings::NativeFormat);
+                const QString email = acc.value(QStringLiteral("UserEmail")).toString();
+                const QString folder = acc.value(QStringLiteral("UserFolder")).toString();
+                const QString tenantId = acc.value(QStringLiteral("ConfiguredTenantId")).toString();
+
+                // "All fields non-empty" is the configured-account predicate.
+                // OneDrive sign-out has been observed to leave partial
+                // registry residue (e.g. UserFolder populated after UserEmail
+                // is gone); treat any missing field as not-active.
+                const bool fieldsComplete = !email.isEmpty() && !folder.isEmpty()
+                    && (isPersonal || !tenantId.isEmpty());
+
+                DetectedAccount a;
+                a.id.type = isPersonal ? QtCloudBackup::StorageType::OneDrivePersonal
+                                       : QtCloudBackup::StorageType::OneDriveCommercial;
+                a.id.accountKey = key;
+                // displayName is the on-disk folder basename as Windows
+                // itself names it — i.e. what File Explorer's nav pane
+                // shows. Typically "OneDrive" for Personal and
+                // "OneDrive - <org>" (e.g. "OneDrive - Contoso") for
+                // Business. The consumer renders Business verbatim and
+                // composes its own label for Personal (Windows's bare
+                // "OneDrive" isn't enough to distinguish it in a multi-
+                // account picker). Falls back to the account key for
+                // partial-registry residue.
+                a.displayName = fieldsComplete ? QFileInfo(folder).fileName() : key;
+                a.email = email;
+                a.tenantId = isPersonal ? QString() : tenantId;
+
+                if (!fieldsComplete) {
+                    a.status = QtCloudBackup::StorageStatus::Unavailable;
+                    a.statusDetail = WindowsOneDriveBackend::tr(
+                        "OneDrive account partially configured");
+                } else if (isPersonal && personalSyncDisabled) {
+                    a.status = QtCloudBackup::StorageStatus::Disabled;
+                    a.statusDetail = WindowsOneDriveBackend::tr(
+                        "Personal OneDrive sync is disabled by your organisation's policy");
+                } else if (isBusiness && !allowed.isEmpty()
+                           && !allowed.contains(tenantId, Qt::CaseInsensitive)) {
+                    a.status = QtCloudBackup::StorageStatus::Disabled;
+                    a.statusDetail = WindowsOneDriveBackend::tr(
+                        "This work account isn't allowed by your organisation's policy");
+                } else if (isBusiness && blocked.contains(tenantId, Qt::CaseInsensitive)) {
+                    a.status = QtCloudBackup::StorageStatus::Disabled;
+                    a.statusDetail = WindowsOneDriveBackend::tr(
+                        "This work account is blocked by your organisation's policy");
+                } else if (!QFileInfo(folder).isWritable()) {
+                    // Metadata check, NOT a write. Detection is side-effect-
+                    // free; the actual writability gate is the mkpath in
+                    // select(). Missing folder also fails isWritable(), which
+                    // is the behaviour we want — signed-out residue surfaces
+                    // as Unavailable rather than Ready.
+                    a.status = QtCloudBackup::StorageStatus::Unavailable;
+                    a.statusDetail = WindowsOneDriveBackend::tr(
+                        "OneDrive folder is missing or not writable");
+                } else {
+                    a.status = QtCloudBackup::StorageStatus::Ready;
+                    a.statusDetail = isPersonal
+                        ? WindowsOneDriveBackend::tr("OneDrive (personal) is available")
+                        : WindowsOneDriveBackend::tr("OneDrive for Business is available");
+                }
+
+                if (!folder.isEmpty())
+                    userFolders.insert(key, folder);
+                accounts.append(a);
+            }
+        }
+
+        QMetaObject::invokeMethod(qApp,
+            [self, gen, accounts, userFolders, deviceBlocked, deviceDetail] {
+                if (!self) return;
+                // Staleness gate: a fresher detect() has already started;
+                // drop this completion rather than letting it clobber
+                // m_lastDetection / re-emit outdated status.
+                if (gen != self->m_detectionGeneration) return;
+                self->applyDetectionResult(accounts, userFolders, deviceBlocked, deviceDetail);
+            }, Qt::QueuedConnection);
+    });
 }
 
-void WindowsOneDriveBackend::select(const AccountId &)
+void WindowsOneDriveBackend::applyDetectionResult(QList<DetectedAccount> accounts,
+                                                  QMap<QString, QString> userFolders,
+                                                  bool deviceBlocked,
+                                                  QString deviceDetail)
 {
-    // Real implementation lands in phase 4.
+    m_lastDetection = accounts;
+    m_userFolders = userFolders;
+
+    if (deviceBlocked) {
+        // Device-level GP block trumps everything: the consumer can't pick
+        // any account. Tear down any active selection and emit Disabled.
+        if (m_selectedId.type != QtCloudBackup::StorageType::None
+            || m_status != QtCloudBackup::StorageStatus::Disabled) {
+            m_backupRoot.clear();
+            m_storageType = QtCloudBackup::StorageType::None;
+            m_selectedId = {};
+            m_status = QtCloudBackup::StorageStatus::Disabled;
+            m_statusDetail = deviceDetail;
+            emit statusChanged(m_status, m_statusDetail);
+        }
+    } else if (m_selectedId.type != QtCloudBackup::StorageType::None) {
+        // Selection-invalidation: if the previously-selected account is no
+        // longer Ready in the new detection result, tear down the active
+        // state. statusChanged fires BEFORE accountsDetected so consumers
+        // see "your storage dropped" before "here are the current options".
+        const DetectedAccount *selectedNow = nullptr;
+        for (const auto &a : m_lastDetection) {
+            if (a.id == m_selectedId) {
+                selectedNow = &a;
+                break;
+            }
+        }
+        const bool stillReady = selectedNow
+            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
+        if (!stillReady) {
+            m_backupRoot.clear();
+            m_storageType = QtCloudBackup::StorageType::None;
+            m_status = selectedNow ? selectedNow->status
+                                   : QtCloudBackup::StorageStatus::Unavailable;
+            m_statusDetail = selectedNow
+                ? selectedNow->statusDetail
+                : tr("Previously-selected OneDrive account is no longer detected");
+            m_selectedId = {};
+            emit statusChanged(m_status, m_statusDetail);
+        }
+    }
+
+    emit accountsDetected(m_lastDetection);
 }
 
-std::optional<AccountId> WindowsOneDriveBackend::resolveAccount(QtCloudBackup::StorageType,
-                                                                const QString &,
-                                                                const QString &) const
+void WindowsOneDriveBackend::select(const AccountId &id)
 {
-    // Real implementation lands in phase 4.
+    if (id.type != QtCloudBackup::StorageType::OneDrivePersonal
+        && id.type != QtCloudBackup::StorageType::OneDriveCommercial) {
+        m_status = QtCloudBackup::StorageStatus::Unavailable;
+        m_statusDetail = tr("Windows build supports only OneDrive accounts in select()");
+        emit statusChanged(m_status, m_statusDetail);
+        return;
+    }
+    if (!m_userFolders.contains(id.accountKey)) {
+        m_status = QtCloudBackup::StorageStatus::Unavailable;
+        m_statusDetail = tr("Account not in current detection — call detect() first");
+        emit statusChanged(m_status, m_statusDetail);
+        return;
+    }
+
+    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::Ready)
+        return; // reentrant no-op
+
+    const int genAtStart = m_detectionGeneration;
+    const QString userFolder = m_userFolders.value(id.accountKey);
+    const QString relPath = QStringLiteral(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH);
+    const QString fullDir = relPath.isEmpty() ? userFolder
+                                              : userFolder + QLatin1Char('/') + relPath;
+
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, id, genAtStart, userFolder, fullDir] {
+        QDir dir(fullDir);
+        const bool ok = dir.exists() || dir.mkpath(QStringLiteral("."));
+
+        QMetaObject::invokeMethod(qApp,
+            [self, id, genAtStart, ok, userFolder] {
+                if (!self) return;
+                // If a detect() ran while we were creating the backup
+                // directory, only apply the result if the target account is
+                // still Ready in the latest detection. Otherwise the
+                // invalidation path has already set the correct state and
+                // we must not clobber it.
+                if (self->m_detectionGeneration != genAtStart) {
+                    bool stillReady = false;
+                    for (const auto &a : self->m_lastDetection) {
+                        if (a.id == id
+                            && a.status == QtCloudBackup::StorageStatus::Ready) {
+                            stillReady = true;
+                            break;
+                        }
+                    }
+                    if (!stillReady)
+                        return;
+                }
+                if (ok) {
+                    self->m_backupRoot = userFolder;
+                    self->m_storageType = id.type;
+                    self->m_selectedId = id;
+                    self->m_status = QtCloudBackup::StorageStatus::Ready;
+                    self->m_statusDetail = (id.type == QtCloudBackup::StorageType::OneDrivePersonal)
+                        ? WindowsOneDriveBackend::tr("Using OneDrive (personal)")
+                        : WindowsOneDriveBackend::tr("Using OneDrive for Business");
+                    emit self->statusChanged(self->m_status, self->m_statusDetail);
+                } else {
+                    self->m_status = QtCloudBackup::StorageStatus::Unavailable;
+                    self->m_statusDetail = WindowsOneDriveBackend::tr(
+                        "Failed to create backup directory");
+                    self->m_backupRoot.clear();
+                    self->m_storageType = QtCloudBackup::StorageType::None;
+                    self->m_selectedId = {};
+                    emit self->statusChanged(self->m_status, self->m_statusDetail);
+                }
+            }, Qt::QueuedConnection);
+    });
+}
+
+std::optional<AccountId> WindowsOneDriveBackend::resolveAccount(QtCloudBackup::StorageType type,
+                                                                const QString &tenantId,
+                                                                const QString &email) const
+{
+    if (type != QtCloudBackup::StorageType::OneDrivePersonal
+        && type != QtCloudBackup::StorageType::OneDriveCommercial) {
+        return std::nullopt;
+    }
+    // Durable identity: Personal matches by email only (MSAs have no tenant);
+    // Business matches by (tenantId, email). accountKey is in-memory only —
+    // OneDrive may re-slot the same account at a different index across
+    // unlink/re-add, so we must not consult the persisted accountKey.
+    for (const auto &a : m_lastDetection) {
+        if (a.id.type != type)
+            continue;
+        const bool emailMatch = a.email.compare(email, Qt::CaseInsensitive) == 0;
+        if (type == QtCloudBackup::StorageType::OneDrivePersonal) {
+            if (emailMatch)
+                return a.id;
+        } else {
+            const bool tenantMatch = a.tenantId.compare(tenantId, Qt::CaseInsensitive) == 0;
+            if (tenantMatch && emailMatch)
+                return a.id;
+        }
+    }
     return std::nullopt;
 }
 
