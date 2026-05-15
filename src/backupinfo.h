@@ -114,6 +114,57 @@ Q_ENUM_NS(BackupError)
 
 } // namespace QtCloudBackup
 
+// Stage-2 handle returned by detection and passed to `select()`. `accountKey`
+// is an in-memory slot name (e.g. "Business2", "Personal", or "" for
+// single-instance platforms). It is NOT stable across unlink/re-add cycles —
+// OneDrive may re-slot the same account on the lowest free index — so
+// consumers must NOT persist `accountKey`. Persist the durable identity
+// (`StorageType` + `tenantId` + `email`) and re-resolve at startup via
+// `CloudBackupManager::resolveAccount()`.
+class AccountId {
+    Q_GADGET
+    Q_PROPERTY(QtCloudBackup::StorageType type MEMBER type)
+    Q_PROPERTY(QString accountKey MEMBER accountKey)
+
+public:
+    QtCloudBackup::StorageType type = QtCloudBackup::StorageType::None;
+    QString accountKey;
+
+    bool operator==(const AccountId &other) const
+    {
+        return type == other.type && accountKey == other.accountKey;
+    }
+    bool operator!=(const AccountId &other) const { return !(*this == other); }
+};
+
+Q_DECLARE_METATYPE(AccountId)
+
+// One row of stage-1 detection output. The library returns a `QList` of these
+// per `detect()` call — zero, one, or many entries depending on backend.
+// Apple always returns exactly one row; Windows returns 0..N; Local always
+// returns one. `status` reflects whether the account is selectable
+// (`Ready`), needs user remediation (`Unavailable`), or is blocked outside
+// the user's control (`Disabled`) — see the `StorageStatus` doc comment.
+class DetectedAccount {
+    Q_GADGET
+    Q_PROPERTY(AccountId id MEMBER id)
+    Q_PROPERTY(QString displayName MEMBER displayName)
+    Q_PROPERTY(QString email MEMBER email)
+    Q_PROPERTY(QString tenantId MEMBER tenantId)
+    Q_PROPERTY(QtCloudBackup::StorageStatus status MEMBER status)
+    Q_PROPERTY(QString statusDetail MEMBER statusDetail)
+
+public:
+    AccountId id;
+    QString displayName;
+    QString email;
+    QString tenantId;
+    QtCloudBackup::StorageStatus status = QtCloudBackup::StorageStatus::Unknown;
+    QString statusDetail;
+};
+
+Q_DECLARE_METATYPE(DetectedAccount)
+
 class OrphanedBackupInfo {
     Q_GADGET
     Q_PROPERTY(QString sourceId MEMBER sourceId)

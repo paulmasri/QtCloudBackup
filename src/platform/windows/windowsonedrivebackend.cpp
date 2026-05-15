@@ -157,6 +157,24 @@ void WindowsOneDriveBackend::initialise()
     });
 }
 
+void WindowsOneDriveBackend::detect()
+{
+    // Real implementation lands in phase 4.
+}
+
+void WindowsOneDriveBackend::select(const AccountId &)
+{
+    // Real implementation lands in phase 4.
+}
+
+std::optional<AccountId> WindowsOneDriveBackend::resolveAccount(QtCloudBackup::StorageType,
+                                                                const QString &,
+                                                                const QString &) const
+{
+    // Real implementation lands in phase 4.
+    return std::nullopt;
+}
+
 QtCloudBackup::StorageStatus WindowsOneDriveBackend::storageStatus() const
 {
     return m_status;

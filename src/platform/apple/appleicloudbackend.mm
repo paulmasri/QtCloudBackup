@@ -109,6 +109,24 @@ void AppleICloudBackend::initialise()
     });
 }
 
+void AppleICloudBackend::detect()
+{
+    // Real implementation lands in phase 3.
+}
+
+void AppleICloudBackend::select(const AccountId &)
+{
+    // Real implementation lands in phase 3.
+}
+
+std::optional<AccountId> AppleICloudBackend::resolveAccount(QtCloudBackup::StorageType,
+                                                            const QString &,
+                                                            const QString &) const
+{
+    // Real implementation lands in phase 3.
+    return std::nullopt;
+}
+
 QtCloudBackup::StorageStatus AppleICloudBackend::storageStatus() const
 {
     return m_status;

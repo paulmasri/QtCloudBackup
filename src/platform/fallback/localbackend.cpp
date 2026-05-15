@@ -45,6 +45,24 @@ void LocalBackend::initialise()
     });
 }
 
+void LocalBackend::detect()
+{
+    // Real implementation lands in phase 5.
+}
+
+void LocalBackend::select(const AccountId &)
+{
+    // Real implementation lands in phase 5.
+}
+
+std::optional<AccountId> LocalBackend::resolveAccount(QtCloudBackup::StorageType,
+                                                     const QString &,
+                                                     const QString &) const
+{
+    // Real implementation lands in phase 5.
+    return std::nullopt;
+}
+
 QtCloudBackup::StorageStatus LocalBackend::storageStatus() const
 {
     return m_status;
