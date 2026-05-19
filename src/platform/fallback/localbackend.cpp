@@ -3,6 +3,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -23,26 +24,117 @@ std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 
 static constexpr qint64 MaxMetaFileSize = 1024 * 1024; // 1 MB
 
-void LocalBackend::initialise()
+void LocalBackend::detect()
 {
-    QString dir = backupDir();
+    const int gen = ++m_detectionGeneration;
+    const QString dir = backupDir();
     QPointer<LocalBackend> self(this);
-    (void)QtConcurrent::run([self, dir] {
-        QDir d(dir);
-        bool ok = d.exists() || d.mkpath(QStringLiteral("."));
+    (void)QtConcurrent::run([self, gen, dir] {
+        // Writability is checked without creating anything (detection is
+        // side-effect-free). If the backup dir itself doesn't yet exist, walk
+        // up the path to the first ancestor that does and check that one —
+        // that's the directory mkpath would actually need to write into.
+        QString probe = dir;
+        while (!QFileInfo::exists(probe)) {
+            const QString parent = QFileInfo(probe).absolutePath();
+            if (parent == probe || parent.isEmpty())
+                break;
+            probe = parent;
+        }
+        const bool writable = QFileInfo::exists(probe) && QFileInfo(probe).isWritable();
 
-        auto status = ok ? QtCloudBackup::StorageStatus::LocalFallback
-                         : QtCloudBackup::StorageStatus::Unavailable;
-        auto detail = ok ? LocalBackend::tr("Using local storage")
-                         : LocalBackend::tr("Failed to create backup directory");
+        DetectedAccount a;
+        a.id = { QtCloudBackup::StorageType::LocalDirectory, QString() };
+        // displayName left empty — id.type uniquely identifies this row, the
+        // consumer composes the label (e.g. "Local folder") itself. Same
+        // convention as Apple iCloud. See DetectedAccount::displayName docs.
+        if (writable) {
+            a.status = QtCloudBackup::StorageStatus::Ready;
+            a.statusDetail = LocalBackend::tr("Local storage is available");
+        } else {
+            a.status = QtCloudBackup::StorageStatus::Unavailable;
+            a.statusDetail = LocalBackend::tr("Local backup directory is not writable");
+        }
 
-        QMetaObject::invokeMethod(qApp, [self, status, detail] {
+        QMetaObject::invokeMethod(qApp, [self, gen, a] {
             if (!self) return;
-            self->m_status = status;
-            self->m_statusDetail = detail;
-            emit self->statusChanged(status, detail);
+            self->applyDetectionResult({ a }, gen);
         }, Qt::QueuedConnection);
     });
+}
+
+void LocalBackend::select(const AccountId &id)
+{
+    if (id.type != QtCloudBackup::StorageType::LocalDirectory) {
+        m_status = QtCloudBackup::StorageStatus::Unavailable;
+        m_statusDetail = tr("Local backend supports only StorageType::LocalDirectory");
+        emit statusChanged(m_status, m_statusDetail);
+        return;
+    }
+
+    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::LocalFallback)
+        return; // reentrant no-op
+
+    const int genAtStart = m_detectionGeneration;
+    const QString dir = backupDir();
+    QPointer<LocalBackend> self(this);
+    (void)QtConcurrent::run([self, id, genAtStart, dir] {
+        // Actual mkpath — the side effect deferred out of detect(). On
+        // success the backend reports LocalFallback rather than Ready: the
+        // consumer chose this explicitly (per spec, LocalFallback is never
+        // assigned automatically as a last resort) and the status signals
+        // "you are on local storage, not cloud sync".
+        QDir d(dir);
+        const bool ok = d.exists() || d.mkpath(QStringLiteral("."));
+
+        QMetaObject::invokeMethod(qApp, [self, id, genAtStart, ok] {
+            if (!self) return;
+            // Staleness check: if a detect() ran while we were mkpathing,
+            // only apply the result if the target is still Ready in the
+            // latest detection. Otherwise the invalidation path has already
+            // set correct state and we must not clobber it.
+            if (self->m_detectionGeneration != genAtStart) {
+                bool stillReady = false;
+                for (const auto &a : self->m_lastDetection) {
+                    if (a.id == id
+                        && a.status == QtCloudBackup::StorageStatus::Ready) {
+                        stillReady = true;
+                        break;
+                    }
+                }
+                if (!stillReady)
+                    return;
+            }
+            if (ok) {
+                self->m_selectedId = id;
+                self->m_status = QtCloudBackup::StorageStatus::LocalFallback;
+                self->m_statusDetail = LocalBackend::tr("Using local storage");
+                emit self->statusChanged(self->m_status, self->m_statusDetail);
+            } else {
+                self->m_status = QtCloudBackup::StorageStatus::Unavailable;
+                self->m_statusDetail = LocalBackend::tr("Failed to create backup directory");
+                self->m_selectedId = {};
+                emit self->statusChanged(self->m_status, self->m_statusDetail);
+            }
+        }, Qt::QueuedConnection);
+    });
+}
+
+std::optional<AccountId> LocalBackend::resolveAccount(QtCloudBackup::StorageType type,
+                                                     const QString & /*tenantId*/,
+                                                     const QString & /*email*/) const
+{
+    if (type != QtCloudBackup::StorageType::LocalDirectory)
+        return std::nullopt;
+    // Single-instance platform. Resolution succeeds iff detect() saw a Ready
+    // local entry.
+    for (const auto &a : m_lastDetection) {
+        if (a.id.type == QtCloudBackup::StorageType::LocalDirectory
+            && a.status == QtCloudBackup::StorageStatus::Ready) {
+            return a.id;
+        }
+    }
+    return std::nullopt;
 }
 
 QtCloudBackup::StorageStatus LocalBackend::storageStatus() const
@@ -257,7 +349,16 @@ void LocalBackend::triggerDownload(const QString &filename)
 
 void LocalBackend::scanOrphanedBackups()
 {
-    // Nothing below local — no orphans possible
+    // Orphan sources = detected accounts minus the selected one. Local
+    // exposes exactly one DetectedAccount (the local directory itself), so
+    // the result is always an empty list. If/when multi-backend builds land
+    // and Local coexists with another backend, this iteration picks up any
+    // additional non-selected Ready accounts automatically.
+    if (m_selectedId.type == QtCloudBackup::StorageType::None) {
+        qWarning("scanOrphanedBackups() called before select() — returning empty list");
+        emit orphanScanCompleted({});
+        return;
+    }
     emit orphanScanCompleted({});
 }
 
@@ -271,4 +372,44 @@ QString LocalBackend::backupDir() const
 {
     return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
            + QStringLiteral("/Backups");
+}
+
+void LocalBackend::applyDetectionResult(QList<DetectedAccount> accounts, int gen)
+{
+    // Staleness gate: a fresher detect() has already started; drop this
+    // stale completion to avoid clobbering m_lastDetection / re-emitting
+    // outdated status.
+    if (gen != m_detectionGeneration)
+        return;
+
+    m_lastDetection = accounts;
+
+    // Selection-invalidation: if a previously-selected account is no longer
+    // Ready in the new detection result, tear down the active state and
+    // emit statusChanged BEFORE accountsDetected so the consumer sees
+    // "your storage dropped" before "here are the current options". Same
+    // pattern as the Apple and Windows backends; for single-account Local
+    // this only fires when the local path becomes non-writable between
+    // detect() calls.
+    if (m_selectedId.type != QtCloudBackup::StorageType::None) {
+        const DetectedAccount *selectedNow = nullptr;
+        for (const auto &a : accounts) {
+            if (a.id == m_selectedId) {
+                selectedNow = &a;
+                break;
+            }
+        }
+        const bool stillReady = selectedNow
+            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
+        if (!stillReady) {
+            m_status = selectedNow ? selectedNow->status
+                                   : QtCloudBackup::StorageStatus::Unavailable;
+            m_statusDetail = selectedNow ? selectedNow->statusDetail
+                                         : tr("Local directory is no longer detected");
+            m_selectedId = {};
+            emit statusChanged(m_status, m_statusDetail);
+        }
+    }
+
+    emit accountsDetected(m_lastDetection);
 }

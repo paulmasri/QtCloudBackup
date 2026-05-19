@@ -40,9 +40,11 @@ AppleICloudBackend::~AppleICloudBackend()
     }
 }
 
-void AppleICloudBackend::initialise()
+void AppleICloudBackend::detect()
 {
-    // Observe iCloud account changes
+    // Install the NSUbiquityIdentityDidChangeNotification observer once.
+    // Re-detection runs on identity change (sign in/out, iCloud Drive
+    // toggle), so the consumer's status stays current without polling.
     if (!m_notificationObserver) {
         QPointer<AppleICloudBackend> self(this);
         id observer = [[NSNotificationCenter defaultCenter]
@@ -51,62 +53,152 @@ void AppleICloudBackend::initialise()
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification *) {
                         if (self)
-                            self->initialise();
+                            self->detect();
                     }];
         m_notificationObserver = (void *)CFBridgingRetain(observer);
     }
 
-    // Check ubiquity identity token on main thread (lightweight)
+    const int gen = ++m_detectionGeneration;
+
+    // Stage 1 step 1: ubiquity identity token, on main thread (lightweight).
     id token = [[NSFileManager defaultManager] ubiquityIdentityToken];
     if (!token) {
-        m_status = QtCloudBackup::StorageStatus::Unavailable;
-        m_statusDetail = tr("iCloud is not available — not signed in or iCloud Drive is disabled");
-        m_containerUrl.clear();
-        stopMetadataQuery();
-        emit statusChanged(m_status, m_statusDetail);
+        DetectedAccount a;
+        a.id = { QtCloudBackup::StorageType::ICloud, QString() };
+        // displayName is left empty: id.type uniquely identifies this as
+        // iCloud, so the consumer composes the full label (e.g.
+        // "iCloud Drive") itself. See DetectedAccount::displayName docs.
+        a.status = QtCloudBackup::StorageStatus::Unavailable;
+        a.statusDetail = tr("iCloud not signed in or iCloud Drive disabled");
+        m_pendingContainerRoot.clear();
+        applyDetectionResult({ a }, gen);
         return;
     }
 
-    // Resolve container URL off main thread — blocks on first call
+    // Stage 1 step 2: container URL resolution off main — per Apple docs,
+    // URLForUbiquityContainerIdentifier: can block on first call.
     QPointer<AppleICloudBackend> self(this);
-    (void)QtConcurrent::run([self] {
+    (void)QtConcurrent::run([self, gen] {
         @autoreleasepool {
             NSURL *url = [[NSFileManager defaultManager]
                 URLForUbiquityContainerIdentifier:containerIdentifier()];
 
-            if (!url) {
-                QMetaObject::invokeMethod(qApp, [self] {
-                    if (!self) return;
-                    self->m_status = QtCloudBackup::StorageStatus::Disabled;
-                    self->m_statusDetail = AppleICloudBackend::tr(
-                        "iCloud container is not available — check entitlements and provisioning profile");
-                    self->m_containerUrl.clear();
-                    self->stopMetadataQuery();
-                    emit self->statusChanged(self->m_status, self->m_statusDetail);
-                }, Qt::QueuedConnection);
-                return;
-            }
+            QString rootPath = url ? QString::fromNSString(url.path) : QString();
 
-            // Create Backups subdirectory
-            NSURL *backupsUrl = [url URLByAppendingPathComponent:@"Backups" isDirectory:YES];
-            NSError *error = nil;
-            [[NSFileManager defaultManager] createDirectoryAtURL:backupsUrl
-                                     withIntermediateDirectories:YES
-                                                      attributes:nil
-                                                           error:&error];
-
-            QString containerPath = QString::fromNSString(backupsUrl.path);
-
-            QMetaObject::invokeMethod(qApp, [self, containerPath] {
+            QMetaObject::invokeMethod(qApp, [self, gen, rootPath] {
                 if (!self) return;
-                self->m_containerUrl = QUrl::fromLocalFile(containerPath);
-                self->m_status = QtCloudBackup::StorageStatus::Ready;
-                self->m_statusDetail = AppleICloudBackend::tr("iCloud storage is available");
-                emit self->statusChanged(self->m_status, self->m_statusDetail);
-                self->startMetadataQuery();
+                DetectedAccount a;
+                a.id = { QtCloudBackup::StorageType::ICloud, QString() };
+                // displayName intentionally empty — see other branch.
+                if (rootPath.isEmpty()) {
+                    self->m_pendingContainerRoot.clear();
+                    a.status = QtCloudBackup::StorageStatus::Disabled;
+                    a.statusDetail = AppleICloudBackend::tr(
+                        "iCloud container is not available — check entitlements and provisioning profile");
+                } else {
+                    self->m_pendingContainerRoot = QUrl::fromLocalFile(rootPath);
+                    a.status = QtCloudBackup::StorageStatus::Ready;
+                    a.statusDetail = AppleICloudBackend::tr("iCloud storage is available");
+                }
+                self->applyDetectionResult({ a }, gen);
             }, Qt::QueuedConnection);
         }
     });
+}
+
+void AppleICloudBackend::select(const AccountId &id)
+{
+    if (id.type != QtCloudBackup::StorageType::ICloud) {
+        m_status = QtCloudBackup::StorageStatus::Unavailable;
+        m_statusDetail = tr("Apple build supports only StorageType::ICloud");
+        emit statusChanged(m_status, m_statusDetail);
+        return;
+    }
+    if (m_pendingContainerRoot.isEmpty()) {
+        m_status = QtCloudBackup::StorageStatus::Unavailable;
+        m_statusDetail = tr("iCloud container not yet resolved — call detect() first");
+        emit statusChanged(m_status, m_statusDetail);
+        return;
+    }
+
+    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::Ready)
+        return; // reentrant no-op
+
+    // Freeze the detection generation at the start of directory creation.
+    // If a detect() runs while we're mid-flight and concludes the target
+    // is no longer Ready, applyDetectionResult() will have already
+    // invalidated the selection; our completion handler then refuses to
+    // clobber that with a stale Ready.
+    const int genAtStart = m_detectionGeneration;
+    const QString rootPath = m_pendingContainerRoot.toLocalFile();
+    QPointer<AppleICloudBackend> self(this);
+    (void)QtConcurrent::run([self, id, genAtStart, rootPath] {
+        @autoreleasepool {
+            NSURL *rootUrl = [NSURL fileURLWithPath:rootPath.toNSString()];
+            NSURL *backupsUrl = [rootUrl URLByAppendingPathComponent:@"Backups" isDirectory:YES];
+            NSError *error = nil;
+            BOOL ok = [[NSFileManager defaultManager] createDirectoryAtURL:backupsUrl
+                                               withIntermediateDirectories:YES
+                                                                attributes:nil
+                                                                     error:&error];
+            QString backupsPath = QString::fromNSString(backupsUrl.path);
+            QString errMsg = ok ? QString()
+                                : QString::fromNSString(error.localizedDescription ?: @"");
+
+            QMetaObject::invokeMethod(qApp, [self, id, genAtStart, ok, backupsPath, errMsg] {
+                if (!self) return;
+                // If a detect() ran while we were creating the Backups
+                // directory, only apply the result if the target account is
+                // still Ready in the latest detection. Otherwise the
+                // invalidation path has already set the correct state and
+                // we must not clobber it.
+                if (self->m_detectionGeneration != genAtStart) {
+                    bool stillReady = false;
+                    for (const auto &a : self->m_lastDetection) {
+                        if (a.id == id && a.status == QtCloudBackup::StorageStatus::Ready) {
+                            stillReady = true;
+                            break;
+                        }
+                    }
+                    if (!stillReady)
+                        return;
+                }
+                if (ok) {
+                    self->m_containerUrl = QUrl::fromLocalFile(backupsPath);
+                    self->m_selectedId = id;
+                    self->m_status = QtCloudBackup::StorageStatus::Ready;
+                    self->m_statusDetail = AppleICloudBackend::tr("iCloud storage is available");
+                    emit self->statusChanged(self->m_status, self->m_statusDetail);
+                    self->startMetadataQuery();
+                } else {
+                    self->m_status = QtCloudBackup::StorageStatus::Unavailable;
+                    self->m_statusDetail = AppleICloudBackend::tr(
+                        "Failed to create Backups directory: %1").arg(errMsg);
+                    self->m_containerUrl.clear();
+                    self->m_selectedId = {};
+                    self->stopMetadataQuery();
+                    emit self->statusChanged(self->m_status, self->m_statusDetail);
+                }
+            }, Qt::QueuedConnection);
+        }
+    });
+}
+
+std::optional<AccountId> AppleICloudBackend::resolveAccount(QtCloudBackup::StorageType type,
+                                                            const QString & /*tenantId*/,
+                                                            const QString & /*email*/) const
+{
+    if (type != QtCloudBackup::StorageType::ICloud)
+        return std::nullopt;
+    // Apple: single-instance platform. Resolution succeeds iff detect() saw
+    // a Ready iCloud account — i.e. token present AND container URL resolved.
+    for (const auto &a : m_lastDetection) {
+        if (a.id.type == QtCloudBackup::StorageType::ICloud
+            && a.status == QtCloudBackup::StorageStatus::Ready) {
+            return a.id;
+        }
+    }
+    return std::nullopt;
 }
 
 QtCloudBackup::StorageStatus AppleICloudBackend::storageStatus() const
@@ -627,65 +719,17 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
 
 void AppleICloudBackend::scanOrphanedBackups()
 {
-    QString fallbackDir = localFallbackDir();
-    QPointer<AppleICloudBackend> self(this);
-    (void)QtConcurrent::run([self, fallbackDir] {
-        @autoreleasepool {
-            QList<OrphanedBackupInfo> orphans;
-
-            QDir d(fallbackDir);
-            if (!d.exists()) {
-                QMetaObject::invokeMethod(qApp, [self, orphans] {
-                    if (!self) return;
-                    emit self->orphanScanCompleted(orphans);
-                }, Qt::QueuedConnection);
-                return;
-            }
-
-            QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
-                                              QDir::Files, QDir::Name);
-
-            static const QRegularExpression re(
-                QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
-
-            for (const QString &entry : entries) {
-                OrphanedBackupInfo info;
-                info.filename = entry;
-                info.originStorageType = QtCloudBackup::StorageType::LocalDirectory;
-                info.originPath = fallbackDir;
-
-                // Try to read .meta sidecar
-                QString metaPath = fallbackDir + QLatin1Char('/') + backupStem(entry)
-                                   + QStringLiteral(".meta");
-                QFile metaFile(metaPath);
-                if (metaFile.open(QIODevice::ReadOnly)) {
-                    QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
-                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                    info.timestamp = QDateTime::fromString(
-                        meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
-                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
-                }
-
-                // Fallback: parse filename
-                if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
-                    auto match = re.match(entry);
-                    if (match.hasMatch()) {
-                        info.sourceId = match.captured(1);
-                        info.timestamp = QDateTime::fromString(
-                            match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
-                        info.timestamp.setTimeZone(QTimeZone::utc());
-                    }
-                }
-
-                orphans.append(info);
-            }
-
-            QMetaObject::invokeMethod(qApp, [self, orphans] {
-                if (!self) return;
-                emit self->orphanScanCompleted(orphans);
-            }, Qt::QueuedConnection);
-        }
-    });
+    // Orphan sources = detected accounts minus the selected one. Apple builds
+    // currently expose exactly one DetectedAccount per platform (iCloud), so
+    // the result is always an empty list. If/when multi-backend builds land
+    // (e.g. iCloud + Local in one binary), this iteration picks up any
+    // additional non-selected Ready accounts automatically.
+    if (m_selectedId.type == QtCloudBackup::StorageType::None) {
+        qWarning("scanOrphanedBackups() called before select() — returning empty list");
+        emit orphanScanCompleted({});
+        return;
+    }
+    emit orphanScanCompleted({});
 }
 
 void AppleICloudBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> &orphans)
@@ -792,12 +836,6 @@ QString AppleICloudBackend::backupDir() const
     return m_containerUrl.toLocalFile();
 }
 
-QString AppleICloudBackend::localFallbackDir() const
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-           + QStringLiteral("/Backups");
-}
-
 // --- NSMetadataQuery for file discovery and remote change detection ---
 
 void AppleICloudBackend::startMetadataQuery()
@@ -890,4 +928,44 @@ void AppleICloudBackend::handleQueryResults()
         for (const QString &sourceId : sourceIds)
             emit remoteChangeDetected(sourceId);
     }
+}
+
+void AppleICloudBackend::applyDetectionResult(QList<DetectedAccount> accounts, int gen)
+{
+    // Generation gate: a fresher detect() has already started; drop this
+    // stale completion to avoid clobbering m_lastDetection / re-emitting
+    // outdated status.
+    if (gen != m_detectionGeneration)
+        return;
+
+    m_lastDetection = accounts;
+
+    // Selection-invalidation: if a previously-selected account is no longer
+    // Ready in the new detection result, tear down the active state and
+    // emit statusChanged so the consumer learns the active target is gone.
+    // Issued BEFORE accountsDetected so the consumer sees "your storage
+    // dropped" before "here are the current options".
+    if (m_selectedId.type != QtCloudBackup::StorageType::None) {
+        const DetectedAccount *selectedNow = nullptr;
+        for (const auto &a : accounts) {
+            if (a.id == m_selectedId) {
+                selectedNow = &a;
+                break;
+            }
+        }
+        const bool stillReady = selectedNow
+            && selectedNow->status == QtCloudBackup::StorageStatus::Ready;
+        if (!stillReady) {
+            stopMetadataQuery();
+            m_containerUrl.clear();
+            m_status = selectedNow ? selectedNow->status
+                                   : QtCloudBackup::StorageStatus::Unavailable;
+            m_statusDetail = selectedNow ? selectedNow->statusDetail
+                                         : tr("Previously-selected iCloud account is no longer detected");
+            m_selectedId = {};
+            emit statusChanged(m_status, m_statusDetail);
+        }
+    }
+
+    emit accountsDetected(m_lastDetection);
 }

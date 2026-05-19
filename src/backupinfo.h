@@ -10,6 +10,46 @@ namespace QtCloudBackup {
 Q_NAMESPACE
 QML_NAMED_ELEMENT(CloudBackup)
 
+// StorageStatus values map to distinct user remediation flows rather than to
+// distinct technical causes — if two states would lead the user to take the
+// same next action, they collapse into one value.
+//
+//   Unknown       Pre-initialisation. No detection has been performed yet.
+//
+//   Ready         Storage is available and writable.
+//                 At backend level (post-`select()`): the active storage
+//                 target is available and writable.
+//                 Per `DetectedAccount` during stage 1 (detection): the
+//                 account is *selectable* — nothing currently rules it out.
+//                 A `Ready` `DetectedAccount` is a candidate to pass to
+//                 `select()`; it does not imply the account is in use.
+//
+//   Unavailable   Storage is not configured. User remediation is possible
+//                 (install the client, sign in, enable the service). Examples:
+//                 Apple — no ubiquity identity token (signed out / iCloud
+//                 Drive off); Windows — partial registry residue, missing/
+//                 unwritable OneDrive folder; Local — backup directory not
+//                 writable. Surface a message that invites the user to
+//                 complete setup.
+//
+//   Disabled      Storage is configured-but-blocked by something outside the
+//                 user's control (IT policy, missing entitlements, unlicensed
+//                 account, tenant restriction). No user action will help;
+//                 the message must NOT invite a sign-in attempt. Examples:
+//                 Apple — container URL unresolvable (most commonly missing
+//                 entitlements/provisioning); Windows — Group Policy block
+//                 (`DisableFileSyncNGSC` device-level, `DisablePersonalSync`
+//                 personal, `AllowTenantList`/`BlockTenantList` business).
+//
+//   LocalFallback Storage backend is using a local directory in lieu of cloud
+//                 sync. Only meaningful as an explicitly-selected target; the
+//                 library never assigns this as an automatic last resort.
+//
+// Known limitation (Apple): MDM-restricted devices are not distinguished from
+// signed-out / iCloud-Drive-off — both collapse into `Unavailable`. The
+// CloudKit API (`CKContainer.accountStatus`) could split these out but would
+// require every consumer to add the CloudKit entitlement and enable CloudKit
+// on their App ID. Disproportionate cost for a niche case; deferred.
 enum class StorageStatus {
     Unknown,
     Ready,
@@ -73,6 +113,91 @@ enum class BackupError {
 Q_ENUM_NS(BackupError)
 
 } // namespace QtCloudBackup
+
+// Stage-2 handle returned by detection and passed to `select()`. `accountKey`
+// is an in-memory slot name (e.g. "Business2", "Personal", or "" for
+// single-instance platforms). It is NOT stable across unlink/re-add cycles —
+// OneDrive may re-slot the same account on the lowest free index — so
+// consumers must NOT persist `accountKey`. Persist the durable identity
+// (`StorageType` + `tenantId` + `email`) and re-resolve at startup via
+// `CloudBackupManager::resolveAccount()`.
+class AccountId {
+    Q_GADGET
+    Q_PROPERTY(QtCloudBackup::StorageType type MEMBER type)
+    Q_PROPERTY(QString accountKey MEMBER accountKey)
+
+public:
+    QtCloudBackup::StorageType type = QtCloudBackup::StorageType::None;
+    QString accountKey;
+
+    bool operator==(const AccountId &other) const
+    {
+        return type == other.type && accountKey == other.accountKey;
+    }
+    bool operator!=(const AccountId &other) const { return !(*this == other); }
+};
+
+Q_DECLARE_METATYPE(AccountId)
+
+// One row of stage-1 detection output. The library returns a `QList` of these
+// per `detect()` call — zero, one, or many entries depending on backend.
+// Apple always returns exactly one row; Windows returns 0..N; Local always
+// returns one. `status` reflects whether the account is selectable
+// (`Ready`), needs user remediation (`Unavailable`), or is blocked outside
+// the user's control (`Disabled`) — see the `StorageStatus` doc comment.
+//
+// Field semantics:
+//
+//   id          Stage-2 handle to pass back to `select()`.
+//
+//   displayName The most natural per-account label the platform provides.
+//               For Windows OneDrive it is the on-disk folder basename as
+//               Windows itself names it — i.e. what File Explorer's nav
+//               pane shows: typically "OneDrive" for Personal and
+//               "OneDrive - <org>" (e.g. "OneDrive - Contoso") for
+//               Business. Renderable verbatim where Windows's naming
+//               suffices (Business) and overridable where it doesn't
+//               (Personal: the bare "OneDrive" doesn't distinguish it in a
+//               multi-account picker). Empty for backends with no folder
+//               concept (Apple, Local) — the consumer composes the full
+//               label from `id.type` instead. The library deliberately
+//               does NOT prefix / strip / translate this string: the
+//               consumer owns capitalisation, translation, and surrounding
+//               chrome.
+//
+//   email       Account email, where applicable. Empty for Apple (CloudKit
+//               not in scope) and Local. Part of the durable identity for
+//               OneDrive accounts.
+//
+//   tenantId    Microsoft Entra tenant GUID for OneDrive Business; empty
+//               for Personal / Apple / Local. Part of the durable identity
+//               for Business accounts.
+//
+//   status      Whether this row is selectable (Ready), needs user
+//               remediation (Unavailable), or is blocked outside the user's
+//               control (Disabled).
+//
+//   statusDetail Human-readable detail explaining the status; suitable for
+//               showing as an inline note or tooltip on disabled rows.
+class DetectedAccount {
+    Q_GADGET
+    Q_PROPERTY(AccountId id MEMBER id)
+    Q_PROPERTY(QString displayName MEMBER displayName)
+    Q_PROPERTY(QString email MEMBER email)
+    Q_PROPERTY(QString tenantId MEMBER tenantId)
+    Q_PROPERTY(QtCloudBackup::StorageStatus status MEMBER status)
+    Q_PROPERTY(QString statusDetail MEMBER statusDetail)
+
+public:
+    AccountId id;
+    QString displayName;
+    QString email;
+    QString tenantId;
+    QtCloudBackup::StorageStatus status = QtCloudBackup::StorageStatus::Unknown;
+    QString statusDetail;
+};
+
+Q_DECLARE_METATYPE(DetectedAccount)
 
 class OrphanedBackupInfo {
     Q_GADGET
