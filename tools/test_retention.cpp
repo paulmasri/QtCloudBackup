@@ -27,7 +27,8 @@ static BackupInfo mk(const QString &filename, const QDateTime &ts,
     b.filename = filename;
     b.timestamp = ts;
     b.sourceId = sourceId;
-    b.metadataAvailable = metadataAvailable;
+    b.metaDownloadState = metadataAvailable ? QtCloudBackup::DownloadState::Local
+                                            : QtCloudBackup::DownloadState::Missing;
     return b;
 }
 
@@ -161,7 +162,7 @@ int main(int argc, char **argv)
     }
 
     // ----------------------------------------------------------------------
-    section("metadataAvailable=false: pending entries preserved, count for occupancy");
+    section("metaDownloadState!=Local: pending entries preserved, count for occupancy");
     {
         const QList<BackupInfo> bs = {
             mk("today_pending", local(2026, 5, 13), QStringLiteral("src"), /*md*/false),
@@ -182,7 +183,7 @@ int main(int argc, char **argv)
     }
 
     // ----------------------------------------------------------------------
-    section("metadataAvailable=false-only satisfies safety net (no force-keep)");
+    section("metaDownloadState!=Local-only satisfies safety net (no force-keep)");
     {
         const QList<BackupInfo> bs = {
             mk("pending", local(2026, 5, 13), QStringLiteral("src"), false),

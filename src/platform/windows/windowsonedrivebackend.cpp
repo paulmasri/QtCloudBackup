@@ -413,7 +413,7 @@ void WindowsOneDriveBackend::deleteBackup(const QString &filename)
         // Delete .meta first (the completion marker), then .bak. Mirrors the
         // write protocol: .bak first, .meta last. If interrupted between the
         // two removals, an orphan .bak is left and the scanner surfaces it
-        // with metadataAvailable=false rather than leaving an invisible
+        // with metaDownloadState=Missing rather than leaving an invisible
         // orphan .meta.
         if (!QFile::remove(metaPath) && QFile::exists(metaPath))
             qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
@@ -456,20 +456,34 @@ void WindowsOneDriveBackend::scanBackups()
                 info.downloadState = QtCloudBackup::DownloadState::Local;
             }
 
-            // Try to read .meta sidecar (bounded). A missing .meta is not
-            // junk under cloud sync — surface honestly via
-            // metadataAvailable=false. May also indicate a Files-On-Demand
-            // placeholder that hasn't yet hydrated.
+            // Read the .meta sidecar (bounded). Windows deliberately does
+            // NOT skip-and-mark cloud-only placeholders the way the Apple
+            // backend does — on Windows we have no consumer-callable
+            // hydration API (CfHydratePlaceholder is provider-only), so a
+            // skip would leave the row perpetually cloud-only and break
+            // retention correctness (excluded from prune indefinitely).
+            // Always opening pays first-scan latency on a new PC where
+            // everything is a placeholder, but each row recovers to Local
+            // afterwards. Per-file cost on OneDrive is small enough (~0.3s
+            // measured) that linear scaling is acceptable.
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
-                QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
-                info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
-                                                        Qt::ISODateWithMs);
-                info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                QJsonParseError parseError;
+                QJsonObject meta = QJsonDocument::fromJson(
+                    metaFile.read(MaxMetaFileSize), &parseError).object();
+                if (parseError.error != QJsonParseError::NoError) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Error;
+                } else {
+                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
+                    info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
+                                                            Qt::ISODateWithMs);
+                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                }
             } else {
-                info.metadataAvailable = false;
+                info.metaDownloadState = QFileInfo::exists(metaPath)
+                    ? QtCloudBackup::DownloadState::Error
+                    : QtCloudBackup::DownloadState::Missing;
             }
 
             // Fallback: parse filename (always needed when .meta is missing,
@@ -582,6 +596,9 @@ void WindowsOneDriveBackend::scanOrphanedBackups()
 
                 const QString metaPath = src.scanDir + QLatin1Char('/')
                     + backupStem(entry) + QStringLiteral(".meta");
+                // Always open() — see scanBackups() rationale: skip-and-mark
+                // on Windows would leave the row perpetually cloud-only
+                // (no consumer-callable hydration API on Windows).
                 QFile metaFile(metaPath);
                 if (metaFile.open(QIODevice::ReadOnly)) {
                     const QJsonObject meta =

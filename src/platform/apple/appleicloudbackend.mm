@@ -3,6 +3,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -435,8 +436,8 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
             // Delete .meta first (the completion marker), then .bak. Mirrors the
             // write protocol (.bak first, .meta last) and ensures that an
             // interruption between the two removals leaves an orphan .bak that
-            // the scanner surfaces with metadataAvailable=false, rather than an
-            // invisible orphan .meta.
+            // the scanner surfaces with metaDownloadState=Missing, rather than
+            // an invisible orphan .meta.
             NSError *metaRemoveError = nil;
             if (![[NSFileManager defaultManager] removeItemAtURL:metaUrl error:&metaRemoveError]
                 && metaRemoveError.code != NSFileNoSuchFileError) {
@@ -520,19 +521,63 @@ void AppleICloudBackend::scanBackups()
                     info.downloadState = QtCloudBackup::DownloadState::Downloading;
                 }
 
-                // Try to read .meta sidecar (bounded). A missing .meta is
-                // not junk under cloud sync — it may be syncing, evicted, or
-                // a stale orphan. Surface honestly via metadataAvailable=false.
+                // Try to read .meta sidecar (bounded). A missing or
+                // cloud-only .meta is not junk under cloud sync — it may be
+                // syncing, evicted, or a stale orphan. Surface honestly via
+                // metaDownloadState rather than blocking on hydration.
                 QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
-                QFile metaFile(metaPath);
-                if (metaFile.open(QIODevice::ReadOnly)) {
-                    QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
-                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                    info.timestamp = QDateTime::fromString(
-                        meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
-                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
+
+                // Probe the .meta download status. Skip open() unless the
+                // file is fully local — otherwise QFile::open() blocks on
+                // bird hydration, serialising the whole scan.
+                NSString *metaStatus = nil;
+                [metaUrl getResourceValue:&metaStatus
+                                   forKey:NSURLUbiquitousItemDownloadingStatusKey
+                                    error:nil];
+                const bool metaLocal = !metaStatus ||
+                    [metaStatus isEqual:NSURLUbiquitousItemDownloadingStatusCurrent];
+
+                // Mirror NSURLUbiquitousItemDownloadingStatus onto the
+                // diagnostic metaDownloadState field. If the sidecar isn't
+                // on disk at all, that's Missing — distinct from CloudOnly.
+                if (!QFileInfo::exists(metaPath)) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Missing;
+                } else if (metaLocal) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Local;
+                } else if ([metaStatus isEqual:NSURLUbiquitousItemDownloadingStatusDownloaded]) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Downloading;
                 } else {
-                    info.metadataAvailable = false;
+                    info.metaDownloadState = QtCloudBackup::DownloadState::CloudOnly;
+                }
+
+                if (metaLocal) {
+                    QFile metaFile(metaPath);
+                    if (metaFile.open(QIODevice::ReadOnly)) {
+                        QJsonParseError parseError;
+                        QJsonObject meta = QJsonDocument::fromJson(
+                            metaFile.read(MaxMetaFileSize), &parseError).object();
+                        if (parseError.error != QJsonParseError::NoError) {
+                            info.metaDownloadState = QtCloudBackup::DownloadState::Error;
+                        } else {
+                            info.sourceId = meta[QStringLiteral("sourceId")].toString();
+                            info.timestamp = QDateTime::fromString(
+                                meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
+                            info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                        }
+                    } else {
+                        // File exists per the status probe but open() failed
+                        // (permissions, IO).
+                        info.metaDownloadState = QtCloudBackup::DownloadState::Error;
+                    }
+                } else {
+                    // Fire-and-forget background hydration so a subsequent
+                    // scan finds the sidecar local. Without this, evicted
+                    // .meta files would stay perpetually cloud-only and
+                    // their .bak would be permanently excluded from prune
+                    // candidates (retention-correctness corollary).
+                    [[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:metaUrl
+                                                                                  error:nil];
                 }
 
                 // Fallback: parse filename (always needed when .meta is
@@ -574,10 +619,10 @@ void AppleICloudBackend::scanBackups()
                         info.filename = qName;
                         info.downloadState = QtCloudBackup::DownloadState::CloudOnly;
                         // Cloud-only: .bak isn't on local disk, so we haven't
-                        // read its .meta sidecar either. Mark as unconfirmed
-                        // so retention excludes from prune candidates until
-                        // a subsequent scan after hydration.
-                        info.metadataAvailable = false;
+                        // read its .meta sidecar either. Mark .meta as
+                        // CloudOnly so retention excludes from prune
+                        // candidates until a subsequent scan after hydration.
+                        info.metaDownloadState = QtCloudBackup::DownloadState::CloudOnly;
 
                         // Check download percentage
                         NSNumber *percent = [item valueForAttribute:

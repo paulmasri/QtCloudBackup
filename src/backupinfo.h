@@ -63,7 +63,10 @@ enum class DownloadState {
     Local,
     CloudOnly,
     Downloading,
-    Error
+    Error,
+    Missing      // file does not exist on disk (only meaningful for .meta;
+                 // .bak entries are surfaced via directory listing so are
+                 // never reported Missing by the scanner)
 };
 Q_ENUM_NS(DownloadState)
 
@@ -226,7 +229,7 @@ class BackupInfo {
     Q_PROPERTY(QVariantMap metadata MEMBER metadata)
     Q_PROPERTY(QString filename MEMBER filename)
     Q_PROPERTY(QtCloudBackup::DownloadState downloadState MEMBER downloadState)
-    Q_PROPERTY(bool metadataAvailable MEMBER metadataAvailable)
+    Q_PROPERTY(QtCloudBackup::DownloadState metaDownloadState MEMBER metaDownloadState)
 
 public:
     QString sourceId;
@@ -234,9 +237,27 @@ public:
     QVariantMap metadata;
     QString filename;
     QtCloudBackup::DownloadState downloadState = QtCloudBackup::DownloadState::Local;
-    // false when the .meta sidecar is missing — may be syncing, evicted, or
-    // never written. The filename still yields sourceId and timestamp.
-    bool metadataAvailable = true;
+    // Mirrors downloadState but for the .meta sidecar. Single source of
+    // truth for whether the metadata map is trustworthy:
+    //
+    //   Local        .meta is on disk and was read+parsed successfully.
+    //                Consumers can use `metadata`, `sourceId` and
+    //                `timestamp` directly. Retention logic considers this
+    //                row a candidate for prune.
+    //   Missing      .meta is not present on disk. Filename regex still
+    //                yields sourceId/timestamp. Excluded from prune.
+    //   CloudOnly    .meta is a cloud placeholder (Apple FoD / OneDrive
+    //                FoD). Scanner skipped open() to avoid blocking on
+    //                hydration. Excluded from prune.
+    //   Downloading  .meta is partially hydrated (Apple only). Excluded
+    //                from prune.
+    //   Error        .meta exists but couldn't be opened (permissions, IO)
+    //                or its JSON failed to parse. Excluded from prune.
+    //
+    // Platform asymmetry: Apple distinguishes all five values; Windows
+    // collapses Downloading into CloudOnly (no available attribute); Local
+    // backend only produces Local / Missing / Error.
+    QtCloudBackup::DownloadState metaDownloadState = QtCloudBackup::DownloadState::Local;
 };
 
 Q_DECLARE_METATYPE(BackupInfo)
