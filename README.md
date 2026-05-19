@@ -6,7 +6,8 @@ A Qt 6.8 library for writing backup files to cloud-synced local storage (iCloud 
 
 QtCloudBackup provides a single C++ class (`CloudBackupManager`) registered as a `QML_ELEMENT` that:
 
-- Detects whether a cloud-backed storage location is available
+- Enumerates available storage accounts (cloud or local) without side effects
+- Activates a consumer-chosen account, including creating the backup subdirectory
 - Writes opaque `QByteArray` payloads as timestamped backup files
 - Lists available backups with metadata and download state
 - Triggers hydration (download) of cloud-only files
@@ -28,10 +29,15 @@ QtCloudBackup provides a single C++ class (`CloudBackupManager`) registered as a
 |----------|---------|-----------------|
 | iOS | iCloud Drive (ubiquity container) | App's iCloud container, invisible to Files app |
 | macOS | iCloud Drive (ubiquity container) | `~/Library/Mobile Documents/<container>/Backups/` |
-| Windows | OneDrive (auto-detected) | OneDrive sync folder, configurable subfolder |
-| Other | Local fallback | `QStandardPaths::AppLocalDataLocation/Backups/` |
+| Windows | OneDrive (Personal and/or Business; 0..N accounts) | OneDrive sync folder, configurable subfolder |
+| Other | Local directory | `QStandardPaths::AppLocalDataLocation/Backups/` |
 
-On Windows, the library auto-detects OneDrive using environment variables and registry keys, with a layered fallback chain: OneDrive for Business → OneDrive Personal → Documents folder.
+Each build compiles exactly one platform backend. The library enumerates whatever accounts that backend can see and hands the list to the consumer to choose from — the consumer's app picks (or auto-picks against a persisted preference); the library never invents a hierarchy or falls back silently.
+
+**Picker shape differs by platform** — consumers writing a picker UI should not assume uniformity:
+- **Apple**: always exactly one row (the device's single iCloud account, with status reflecting its state).
+- **Windows**: zero, one, or many rows (a device may have 0 OneDrive accounts, or 1 Personal + 0..9 Business).
+- **Local**: exactly one row.
 
 ## Requirements
 
@@ -111,16 +117,24 @@ macOS development builds must be code-signed to access iCloud. Use the Xcode CMa
 
 ## Windows setup
 
-No special setup required. The library auto-detects OneDrive via:
+No special setup required. The library enumerates OneDrive accounts from the registry under `HKCU\Software\Microsoft\OneDrive\Accounts\*`, recognising `Personal` and `Business1`..`Business9` subkeys (gap-tolerant — accounts removed and re-added can leave gaps). For each subkey, it reads `UserEmail`, `UserFolder`, and (for Business) `ConfiguredTenantId`; all three must be present for the account to be considered configured.
 
-1. `%OneDriveCommercial%` environment variable
-2. Registry: `HKCU\Software\Microsoft\OneDrive\Accounts\Business1\UserFolder`
-3. `%OneDriveConsumer%` environment variable
-4. Registry: `HKCU\Software\Microsoft\OneDrive\Accounts\Personal\UserFolder`
-5. `%OneDrive%` environment variable
-6. Documents folder fallback (`SHGetKnownFolderPath`)
+Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g. `"YourApp/Backups"`) to avoid polluting the root. **Do not use `"Personal Vault"`** — that name collides with OneDrive's locked virtual folder and writes will fail when the vault is locked. The library's CMake enforces this at configure time with a `FATAL_ERROR`. Choose a unique, app-namespaced subfolder name.
 
-Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g. `"YourApp/Backups"`) to avoid polluting the root.
+### Group Policy
+
+The library honours these Group Policy settings. Note the **two different policy roots** — `HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive\` (with `Windows\`) vs `HKLM\SOFTWARE\Policies\Microsoft\OneDrive\` (no `Windows\`) — easy to confuse:
+
+| Policy value | Root | Scope | Effect |
+|---|---|---|---|
+| `DisableFileSyncNGSC` (DWORD) | `HKLM\SOFTWARE\Policies\Microsoft\`**`Windows\`**`OneDrive\` | Device-level | If `1`, OneDrive sync is disabled across the device. Library reports a backend-level `Disabled`; no accounts are enumerated. |
+| `DisablePersonalSync` (DWORD) | `HKCU` or `HKLM\SOFTWARE\Policies\Microsoft\OneDrive\` | Personal accounts only | If `1` in either hive, any detected `Personal` account is reported as `Disabled`. |
+| `AllowTenantList` (values) | `HKLM\SOFTWARE\Policies\Microsoft\OneDrive\AllowTenantList` | Business accounts | When non-empty, only the listed tenant GUIDs may sign in. Business accounts whose `ConfiguredTenantId` is **not** in the list are reported as `Disabled`. Takes precedence over `BlockTenantList`. |
+| `BlockTenantList` (values) | `HKLM\SOFTWARE\Policies\Microsoft\OneDrive\BlockTenantList` | Business accounts | Business accounts whose `ConfiguredTenantId` is in the list are reported as `Disabled`. |
+
+`AllowTenantList` / `BlockTenantList` are registry **keys** whose **values** name tenant GUIDs (not subkeys). They do not apply to Personal accounts (MSAs have no tenant).
+
+Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection`) exist but are not consulted — they're not useful for the "is this account usable?" question.
 
 ## API quick reference
 
@@ -144,7 +158,9 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 | `restoreBackup(filename)` | Read a backup; auto-downloads if cloud-only |
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
 | `deleteBackup(filename)` | Delete a backup and its metadata sidecar |
-| `refresh()` | Re-check cloud availability and reinitialise |
+| `detect()` | Stage 1: enumerate candidate accounts. No filesystem side effects. Result delivered via `accountsDetected`. See [Storage lifecycle](#storage-lifecycle). |
+| `select(type, accountKey)` | Stage 2: activate the chosen account (creates the backup subdirectory; brings up platform machinery). Status delivered via `statusChanged`. Reentrant — switching does not migrate existing backups. |
+| `resolveAccount(type, tenantId, email)` | Maps a persisted durable identity to the current in-memory `AccountId`. Returns an empty map if the account is no longer detected; otherwise `{ type, accountKey }`. Pair with `select()` to reconnect to a saved choice. |
 | `prune(sourceId)` | Apply the current `retentionPolicy` to `sourceId` immediately. Useful after a policy change. No-op while a backup is in progress. |
 | `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
@@ -154,7 +170,8 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 
 | Signal | Description |
 |--------|-------------|
-| `statusChanged(status, detail)` | Storage status changed |
+| `accountsDetected(accounts)` | `detect()` complete; `accounts` is a `QList<DetectedAccount>`. May fire any time platform events trigger re-detection (e.g. iCloud sign-in change). |
+| `statusChanged(status, detail)` | Active target's status changed. Fires from `select()` completion, from `detect()`-driven invalidation (a previously-selected account is no longer Ready), and from platform-event-driven re-detection. See [Storage state can change at runtime](#storage-state-can-change-at-runtime). |
 | `backupSucceeded(filename, timestamp)` | Backup created |
 | `backupFailed(error, message)` | Backup creation failed (see BackupError enum) |
 | `backupsListed(backups)` | Scan complete; `backups` is a `QList<BackupInfo>` |
@@ -203,6 +220,24 @@ Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g.
 | `downloadState` | `Local` / `CloudOnly` / `Downloading` / `Error` |
 | `metadataAvailable` | `true` when the `.meta` sidecar was readable. `false` when the `.bak` is observed without its `.meta` (mid-sync, evicted, or orphaned). Consumers may render these as "metadata syncing"; retention treats them as present-but-unconfirmed. |
 
+**DetectedAccount** — entries in `accountsDetected`:
+
+| Field | Description |
+|-------|-------------|
+| `id` | `AccountId` — pair this with `select()`. |
+| `displayName` | Per-account label fragment. For Windows OneDrive it's the on-disk folder basename (e.g. `"OneDrive"` for Personal, `"OneDrive - Contoso"` for Business — what File Explorer shows). Empty for Apple and Local: `id.type` uniquely identifies those rows, so the consumer composes the label itself. |
+| `email` | Account email (OneDrive). Empty for Apple and Local. Part of the durable identity for OneDrive. |
+| `tenantId` | Microsoft Entra tenant GUID for OneDrive Business; empty otherwise. Part of the durable identity for Business. |
+| `status` | `Ready` (selectable), `Unavailable` (user remediation possible), `Disabled` (blocked outside user's control). |
+| `statusDetail` | Human-readable explanation suitable for inline tooltips on disabled rows. |
+
+**AccountId** — in-memory handle returned by detection:
+
+| Field | Description |
+|-------|-------------|
+| `type` | `StorageType` of the account. |
+| `accountKey` | Slot name (e.g. `"Business2"`, `"Personal"`, or `""`). **In-memory only — do not persist.** OneDrive may re-slot the same account at a different index across unlink/re-add, so a saved `accountKey` may resolve to the wrong account or to nothing. Persist `(StorageType, tenantId, email)` and call `resolveAccount()` at startup. |
+
 ## QML usage example
 
 ```qml
@@ -250,13 +285,25 @@ Item {
         backupManager.createBackup(sourceId, payload, { "device": "iPhone" })
     }
 
+    // Lifecycle: detect candidate accounts, then select one (here: the first
+    // Ready entry; a real consumer would either resolve a persisted choice
+    // via resolveAccount() or show a picker).
+    onAccountsDetected: (accounts) => {
+        for (let i = 0; i < accounts.length; i++) {
+            if (accounts[i].status === CloudBackup.StorageStatus.Ready) {
+                backupManager.select(accounts[i].id.type, accounts[i].id.accountKey)
+                return
+            }
+        }
+    }
+
     // List and restore
     Component.onCompleted: {
         backupManager.backupsListed.connect(function(backups) {
             if (backups.length > 0)
                 backupManager.restoreBackup(backups[0].filename)
         })
-        backupManager.listBackups()
+        backupManager.detect()
     }
 }
 ```
@@ -285,7 +332,20 @@ connect(manager, &CloudBackupManager::restoreUpdated,
         qDebug() << "Restore failed:" << error << message;
 });
 
-// Create a backup
+// Lifecycle: detect, then select. A real consumer would resolve a persisted
+// durable identity here via resolveAccount() or present a picker.
+connect(manager, &CloudBackupManager::accountsDetected, this,
+        [manager](const QList<DetectedAccount> &accounts) {
+    for (const auto &a : accounts) {
+        if (a.status == QtCloudBackup::StorageStatus::Ready) {
+            manager->select(a.id.type, a.id.accountKey);
+            return;
+        }
+    }
+});
+manager->detect();
+
+// Create a backup once status is Ready
 QByteArray payload = /* your serialised data */;
 QVariantMap meta = { { "device", "iPhone" } };
 manager->createBackup("my-source-id", payload, meta);
@@ -298,6 +358,112 @@ connect(manager, &CloudBackupManager::backupsListed,
 });
 manager->listBackups();
 ```
+
+## Storage lifecycle
+
+Construction of `CloudBackupManager` is side-effect-free — no registry reads, no filesystem touches. The consumer drives the lifecycle in two stages:
+
+1. **`detect()`** — enumerates candidate accounts. Result delivered asynchronously via `accountsDetected(QList<DetectedAccount>)`. No filesystem writes; no folder creation.
+2. **`select(type, accountKey)`** — activates one of the detected accounts. Creates the backup subdirectory, brings up platform machinery (e.g. iCloud's `NSMetadataQuery`), and emits `statusChanged` with the result.
+
+Typical startup flow with a persisted user preference:
+
+```cpp
+connect(manager, &CloudBackupManager::accountsDetected, this,
+    [manager, savedType, savedTenantId, savedEmail](auto) {
+        const QVariantMap id = manager->resolveAccount(savedType, savedTenantId, savedEmail);
+        if (!id.isEmpty())
+            manager->select(QtCloudBackup::StorageType(id["type"].toInt()),
+                            id["accountKey"].toString());
+        else
+            showPicker();  // saved account no longer detected
+    });
+manager->detect();
+```
+
+Or in QML:
+
+```qml
+CloudBackupManager {
+    id: backupManager
+    onAccountsDetected: (accounts) => {
+        const id = backupManager.resolveAccount(savedType, savedTenantId, savedEmail)
+        if (id.type !== undefined)
+            backupManager.select(id.type, id.accountKey)
+        else
+            picker.open()
+    }
+    Component.onCompleted: detect()
+}
+```
+
+`select()` is **reentrant** — calling it with a different `AccountId` switches the active target without tearing down the backend. **Switching does not migrate existing backups**: backups already on the previous target remain there as orphans. Migration is a separate, explicit operation via [Orphaned backup migration](#orphaned-backup-migration); implicit migration on every `select()` would be surprising (a user who picks the wrong account and switches back wouldn't expect a round-trip of file moves).
+
+## Status semantics
+
+`StorageStatus` values map to **distinct user remediation flows** rather than to distinct technical causes. If two states would lead the user to take the same next action, they collapse into one value.
+
+| Value | Meaning | Who can fix |
+|---|---|---|
+| `Unknown` | Pre-`detect()`. No detection has run yet. | — |
+| `Ready` | Storage is available and writable. Per-`DetectedAccount` during detection: "selectable". After `select()`: "the active target is up". | — |
+| `Unavailable` | Storage is not configured. User can complete setup (install client / sign in / enable service). | User |
+| `Disabled` | Storage is configured-but-blocked by something outside the user's control (IT policy, missing entitlements, unlicensed account, tenant restriction). | Nobody locally |
+| `LocalFallback` | Backend is using a local directory in lieu of cloud sync. Only ever assigned when the consumer explicitly selects `LocalDirectory` — never automatic. | — |
+
+UI implication: `Disabled` rows should explain the situation without inviting a sign-in attempt; `Unavailable` rows should prompt setup.
+
+### Per-platform mapping
+
+**Apple iCloud** (detection signals: `[NSFileManager ubiquityIdentityToken]`, `URLForUbiquityContainerIdentifier:`):
+
+| Condition | Status |
+|---|---|
+| Ubiquity token nil (signed out / iCloud Drive off / MDM-restricted) | `Unavailable` |
+| Token present, container URL nil (entitlements / provisioning) | `Disabled` |
+| Both succeed | `Ready` |
+
+**Windows OneDrive** (detection signals: registry under `HKCU\Software\Microsoft\OneDrive\Accounts\*`; Group Policy as documented above):
+
+| Condition | Status |
+|---|---|
+| Device-level `DisableFileSyncNGSC = 1` | Backend-level `Disabled`; no accounts enumerated |
+| Account fields incomplete (signed-out residue, partial config) | `Unavailable` (per account) |
+| Personal account with `DisablePersonalSync = 1` (HKCU or HKLM) | `Disabled` (per account) |
+| Business account blocked by `AllowTenantList` / `BlockTenantList` | `Disabled` (per account) |
+| `UserFolder` missing or not writable | `Unavailable` (per account) |
+| All fields complete, no policy block, folder writable | `Ready` (per account) |
+
+**Local** (detection signal: `QFileInfo::isWritable()` walking up to first existing ancestor):
+
+| Condition | Status |
+|---|---|
+| Backup directory writable | `Ready` |
+| Not writable | `Unavailable` |
+| Successfully selected | `LocalFallback` |
+
+### Known limitation: Apple MDM-restricted
+
+`CKContainer.accountStatus` (CloudKit) can distinguish four account states including `.restricted` (MDM / parental controls / Screen Time blocks), which would map cleanly to `Disabled`. The library deliberately does **not** bring CloudKit into scope — doing so would require every consumer to add the `CloudKit` (or `CloudKit-Anonymous`) entitlement, enable CloudKit on the App ID in the Apple Developer portal, and regenerate provisioning profiles. Disproportionate cost for a niche case.
+
+Consequence: on Apple, MDM-restricted devices collapse into `Unavailable` along with signed-out and iCloud-Drive-off. The contract is slightly leaky here. If this becomes important later, `CKContainer.accountStatus` can be added as a deliberate enhancement.
+
+## Storage state can change at runtime
+
+A `Ready` outcome from `select()` is not permanent. External events can invalidate the active target without any action from the consumer:
+
+- **Apple**: the library observes `NSUbiquityIdentityDidChangeNotification` and re-runs `detect()` automatically when the user signs in/out of iCloud or toggles iCloud Drive in System Settings.
+- **Windows**: re-detection currently only runs when the consumer calls `detect()`, but the same invalidation logic applies whenever a fresh detection shows the active account is no longer `Ready` (policy change, account unlinked, etc.).
+- **Local**: same — re-detection is consumer-driven.
+
+When re-detection finds that the previously-selected account is no longer `Ready`, the library tears down the active state (clears the cached path, stops platform machinery) and emits `statusChanged` reflecting the new reality. **This signal is emitted before `accountsDetected`** so the consumer sees "your storage dropped" before "here are the current options".
+
+**Consumer obligations:**
+
+- Connect to `statusChanged` **once at startup** and tolerate events at any time — not only in direct response to your own `select()` calls.
+- Don't cache `storageStatus == Ready` and act on the cached value later. Read it at the point of use.
+- **In-flight file operations may complete with errors after an invalidating `statusChanged`.** A `writeBackup` worker captured the path before invalidation and runs to OS-level failure; the resulting `writeCompleted(IOError, …)` is a normal error, not a panic. Surface it like any other I/O error.
+- Treat `statusChanged(Unavailable | Disabled)` after a previously-Ready state as a prompt to re-show the picker (or whatever your UX is for "storage went away").
 
 ## How pruning works
 
@@ -444,11 +610,13 @@ This invariant holds **only** at the writer's local filesystem at write/delete t
 
 *This feature is optional. Apps that don't need it can ignore these methods entirely — the library never auto-checks or auto-migrates.*
 
-When storage availability changes between sessions — for example, the user signs into iCloud, installs OneDrive, or switches from OneDrive Personal to Commercial — the library selects a higher-priority backend on next launch. Backups created in the previous location still exist on disk but are no longer visible through `listBackups()`.
+When the consumer switches the active account (e.g. the user picks a different OneDrive account, or signs into iCloud and the app re-selects it), backups created against the previous target still exist on disk but are no longer visible through `listBackups()`. `select()` deliberately does **not** migrate — see [Storage lifecycle](#storage-lifecycle) — so the previous backups become orphans until explicitly migrated.
 
-`checkForOrphanedBackups()` scans lower-priority storage locations for these leftover files. If any are found, `orphanedBackupsDetected` emits a list of `OrphanedBackupInfo` items (each with `sourceId`, `timestamp`, `filename`, `originStorageType`, and `originPath`), and `hasOrphanedBackups` becomes `true`. The app can then present this information to the user and call `migrateOrphanedBackups()` if the user opts in. Migration copies the files to the active backend, deletes the originals, and reports progress via `migrationUpdated`.
+`checkForOrphanedBackups()` scans **the cached detection result minus the currently-selected account**, restricted to accounts whose status is `Ready` (orphans aren't discoverable from `Disabled` / `Unavailable` accounts). For each such account it enumerates the backup subdirectory and emits any `*.bak` files as `OrphanedBackupInfo` entries via `orphanedBackupsDetected`. The app can then present this information to the user and call `migrateOrphanedBackups()` if the user opts in. Migration copies the files to the active backend, deletes the originals, and reports progress via `migrationUpdated`.
 
 Both detection and migration are on-demand — the app decides when and whether to call them.
+
+**Precondition:** `select()` must have been called. Orphans are defined relative to a migration target; calling `checkForOrphanedBackups()` first returns an empty list and logs a warning.
 
 ### QML example
 
@@ -498,18 +666,20 @@ manager->checkForOrphanedBackups();
 
 ### What gets scanned
 
-| Active backend | Locations scanned for orphans |
-|---------------|-------------------------------|
-| iCloud | Local fallback (`AppLocalDataLocation/Backups/`) |
-| OneDrive Commercial | Lower-priority OneDrive candidates + local fallback |
-| OneDrive Personal | Local fallback |
-| Local fallback | Nothing (no lower-priority location exists) |
+Concretely: for each `DetectedAccount` in the cached `detect()` result where the id differs from the currently-selected account and the status is `Ready`, the backup subdirectory is enumerated. In current builds (one platform backend compiled in), the practical result is:
+
+- **Apple**: always empty — Apple builds expose a single iCloud account per device.
+- **Windows**: any other Ready OneDrive account (Personal ↔ Business, or another Business account on the same machine) becomes an orphan source after switching.
+- **Local**: always empty — Local builds expose a single account.
+
+The API is shaped to support future multi-backend builds (e.g. iCloud + Local on macOS) where additional detected accounts naturally appear as orphan sources without further wiring.
 
 ### Edge cases
 
 - **Duplicate filenames**: files already present in the active location are skipped (likely from a previous partial migration).
 - **Partial failure**: migration continues past individual errors, reports `MigrationFailed` with the count of successes, and leaves failed originals in place for retry.
-- **iCloud signed out**: the local fallback backend is active, so there's nothing lower-priority to scan — `checkForOrphanedBackups()` returns an empty list. Orphans reappear when the user signs back in.
+- **Cloud-sync partial state**: orphan accounts often go unsynced for longer than the active account, so partial states (`.bak` present, `.meta` not yet synced, or vice versa) are more common when scanning orphans. The `metadataAvailable` flag on `BackupInfo` applies here too; consumers presenting an orphan migration UI should expect the listing to evolve as cloud sync converges.
+- **A `Disabled` / `Unavailable` account as orphan source**: skipped — orphans are only discoverable from accessible accounts.
 
 ## Known limitations
 
