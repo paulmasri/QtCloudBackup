@@ -24,9 +24,9 @@ struct Result {
 //   in local time, not calendar buckets. A holiday gap doesn't shrink the
 //   retained set.
 // - keepLast is unbucketed: N most recent by timestamp.
-// - Entries with metadataAvailable=false (cloud-syncing / evicted / orphan
-//   .bak) are never pruned, but DO count toward bucket occupancy and toward
-//   the min-keep safety net.
+// - Entries with metaDownloadState != Local (cloud-syncing / evicted / orphan
+//   .bak / read error) are never pruned, but DO count toward bucket occupancy
+//   and toward the min-keep safety net.
 // - Minimum-keep safety invariant: if the policy would prune every confirmed
 //   backup AND there are no pending entries preserving "we have backups",
 //   force-keep the most recent confirmed and set safetyNetEngaged=true.

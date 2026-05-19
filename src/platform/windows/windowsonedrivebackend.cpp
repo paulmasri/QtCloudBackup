@@ -413,7 +413,7 @@ void WindowsOneDriveBackend::deleteBackup(const QString &filename)
         // Delete .meta first (the completion marker), then .bak. Mirrors the
         // write protocol: .bak first, .meta last. If interrupted between the
         // two removals, an orphan .bak is left and the scanner surfaces it
-        // with metadataAvailable=false rather than leaving an invisible
+        // with metaDownloadState=Missing rather than leaving an invisible
         // orphan .meta.
         if (!QFile::remove(metaPath) && QFile::exists(metaPath))
             qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
@@ -457,19 +457,28 @@ void WindowsOneDriveBackend::scanBackups()
             }
 
             // Try to read .meta sidecar (bounded). A missing .meta is not
-            // junk under cloud sync — surface honestly via
-            // metadataAvailable=false. May also indicate a Files-On-Demand
-            // placeholder that hasn't yet hydrated.
+            // junk under cloud sync — surface honestly via metaDownloadState.
+            // (Phase 3 of #7 adds a FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+            // pre-check here so cloud-only .meta is reported CloudOnly
+            // without an open() that would block on hydration.)
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
-                QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
-                info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
-                                                        Qt::ISODateWithMs);
-                info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                QJsonParseError parseError;
+                QJsonObject meta = QJsonDocument::fromJson(
+                    metaFile.read(MaxMetaFileSize), &parseError).object();
+                if (parseError.error != QJsonParseError::NoError) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Error;
+                } else {
+                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
+                    info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
+                                                            Qt::ISODateWithMs);
+                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                }
             } else {
-                info.metadataAvailable = false;
+                info.metaDownloadState = QFileInfo::exists(metaPath)
+                    ? QtCloudBackup::DownloadState::Error
+                    : QtCloudBackup::DownloadState::Missing;
             }
 
             // Fallback: parse filename (always needed when .meta is missing,

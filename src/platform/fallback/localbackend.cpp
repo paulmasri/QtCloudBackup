@@ -265,8 +265,8 @@ void LocalBackend::deleteBackup(const QString &filename)
         // Delete .meta first (the completion marker), then .bak. Mirrors the
         // write protocol: .bak written first, .meta last. If interrupted after
         // .meta removal but before .bak removal, the .bak is left as an orphan
-        // which the scanner surfaces with metadataAvailable=false rather than
-        // an invisible orphan .meta.
+        // which the scanner surfaces with metaDownloadState=Missing rather
+        // than leaving an invisible orphan .meta.
         if (!QFile::remove(metaPath) && QFile::exists(metaPath))
             qWarning("Failed to remove metadata sidecar: %s", qPrintable(metaPath));
         bool ok = QFile::remove(bakPath);
@@ -299,24 +299,27 @@ void LocalBackend::scanBackups()
             info.filename = entry;
             info.downloadState = QtCloudBackup::DownloadState::Local;
 
-            // Try to read .meta sidecar (bounded). A missing .meta is not
-            // junk — under cloud sync it may be syncing, evicted, or it may
-            // be a stale orphan from an interrupted delete. Surface honestly
-            // via metadataAvailable=false and let the consumer/retention
-            // decide how to treat it.
+            // Try to read .meta sidecar (bounded). A missing .meta may be a
+            // stale orphan from an interrupted delete; surface honestly via
+            // metaDownloadState and let the consumer/retention decide.
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
-            const bool metaExists = QFileInfo::exists(metaPath);
-            info.metaDownloadState = metaExists ? QtCloudBackup::DownloadState::Local
-                                                : QtCloudBackup::DownloadState::Missing;
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
-                QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
-                info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
-                                                        Qt::ISODateWithMs);
-                info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                QJsonParseError parseError;
+                QJsonObject meta = QJsonDocument::fromJson(
+                    metaFile.read(MaxMetaFileSize), &parseError).object();
+                if (parseError.error != QJsonParseError::NoError) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Error;
+                } else {
+                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
+                    info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
+                                                            Qt::ISODateWithMs);
+                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                }
             } else {
-                info.metadataAvailable = false;
+                info.metaDownloadState = QFileInfo::exists(metaPath)
+                    ? QtCloudBackup::DownloadState::Error
+                    : QtCloudBackup::DownloadState::Missing;
             }
 
             // Fallback: parse filename (always needed when .meta is missing,

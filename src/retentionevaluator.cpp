@@ -70,7 +70,7 @@ void selectBucketed(const QList<BackupInfo> &all, int n, BucketFn bucketOf,
     for (const BackupInfo &b : all) {
         const BucketKey key = bucketOf(b.timestamp);
         occupiedBuckets.insert(key);
-        if (!b.metadataAvailable)
+        if (b.metaDownloadState != QtCloudBackup::DownloadState::Local)
             continue;
         auto it = latestConfirmedPerBucket.find(key);
         if (it == latestConfirmedPerBucket.end() || b.timestamp > it.value()->timestamp)
@@ -103,7 +103,7 @@ Result evaluate(const QList<BackupInfo> &backupsForSource,
     QList<BackupInfo> pending;
     confirmed.reserve(backupsForSource.size());
     for (const BackupInfo &b : backupsForSource) {
-        if (b.metadataAvailable)
+        if (b.metaDownloadState == QtCloudBackup::DownloadState::Local)
             confirmed.append(b);
         else
             pending.append(b);
