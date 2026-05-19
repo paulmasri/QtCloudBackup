@@ -305,6 +305,9 @@ void LocalBackend::scanBackups()
             // via metadataAvailable=false and let the consumer/retention
             // decide how to treat it.
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
+            const bool metaExists = QFileInfo::exists(metaPath);
+            info.metaDownloadState = metaExists ? QtCloudBackup::DownloadState::Local
+                                                : QtCloudBackup::DownloadState::Missing;
             QFile metaFile(metaPath);
             if (metaFile.open(QIODevice::ReadOnly)) {
                 QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();

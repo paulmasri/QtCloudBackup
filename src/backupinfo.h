@@ -63,7 +63,10 @@ enum class DownloadState {
     Local,
     CloudOnly,
     Downloading,
-    Error
+    Error,
+    Missing      // file does not exist on disk (only meaningful for .meta;
+                 // .bak entries are surfaced via directory listing so are
+                 // never reported Missing by the scanner)
 };
 Q_ENUM_NS(DownloadState)
 
@@ -226,6 +229,7 @@ class BackupInfo {
     Q_PROPERTY(QVariantMap metadata MEMBER metadata)
     Q_PROPERTY(QString filename MEMBER filename)
     Q_PROPERTY(QtCloudBackup::DownloadState downloadState MEMBER downloadState)
+    Q_PROPERTY(QtCloudBackup::DownloadState metaDownloadState MEMBER metaDownloadState)
     Q_PROPERTY(bool metadataAvailable MEMBER metadataAvailable)
 
 public:
@@ -234,8 +238,17 @@ public:
     QVariantMap metadata;
     QString filename;
     QtCloudBackup::DownloadState downloadState = QtCloudBackup::DownloadState::Local;
-    // false when the .meta sidecar is missing — may be syncing, evicted, or
-    // never written. The filename still yields sourceId and timestamp.
+    // Diagnostic mirror of downloadState but for the .meta sidecar.
+    // Retention logic keys off metadataAvailable, not this field; consumers
+    // can use it to e.g. drive auto-refresh only when something is actively
+    // hydrating, or to distinguish a real orphan (Missing) from a
+    // placeholder (CloudOnly). Platform asymmetry: Apple distinguishes all
+    // states; Windows collapses Downloading into CloudOnly (no available
+    // attribute); Local backend only produces Local / Missing.
+    QtCloudBackup::DownloadState metaDownloadState = QtCloudBackup::DownloadState::Local;
+    // false when the .meta sidecar is missing, evicted, or cloud-only — may
+    // be syncing, evicted, or never written. The filename still yields
+    // sourceId and timestamp.
     bool metadataAvailable = true;
 };
 

@@ -3,6 +3,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -536,6 +537,19 @@ void AppleICloudBackend::scanBackups()
                                     error:nil];
                 const bool metaLocal = !metaStatus ||
                     [metaStatus isEqual:NSURLUbiquitousItemDownloadingStatusCurrent];
+
+                // Mirror NSURLUbiquitousItemDownloadingStatus onto the
+                // diagnostic metaDownloadState field. If the sidecar isn't
+                // on disk at all, that's Missing — distinct from CloudOnly.
+                if (!QFileInfo::exists(metaPath)) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Missing;
+                } else if (metaLocal) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Local;
+                } else if ([metaStatus isEqual:NSURLUbiquitousItemDownloadingStatusDownloaded]) {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::Downloading;
+                } else {
+                    info.metaDownloadState = QtCloudBackup::DownloadState::CloudOnly;
+                }
 
                 if (metaLocal) {
                     QFile metaFile(metaPath);
