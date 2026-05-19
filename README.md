@@ -189,7 +189,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 
 **StorageType**: `None`, `ICloud`, `OneDrivePersonal`, `OneDriveCommercial`, `LocalDirectory`
 
-**DownloadState** (on BackupInfo): `Local`, `CloudOnly`, `Downloading`, `Error`
+**DownloadState** (on BackupInfo, used by both `downloadState` and `metaDownloadState`): `Local`, `CloudOnly`, `Downloading`, `Error`, `Missing`
 
 **RestoreStatus**: `RestoreDownloading`, `RestoreInProgress`, `RestoreSucceeded`, `RestoreFailed`
 
@@ -217,8 +217,8 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 |-------|-------------|
 | `sourceId`, `timestamp`, `filename` | Identifying fields |
 | `metadata` | Application-supplied map from `createBackup` |
-| `downloadState` | `Local` / `CloudOnly` / `Downloading` / `Error` |
-| `metadataAvailable` | `true` when the `.meta` sidecar was readable. `false` when the `.bak` is observed without its `.meta` (mid-sync, evicted, or orphaned). Consumers may render these as "metadata syncing"; retention treats them as present-but-unconfirmed. |
+| `downloadState` | State of the `.bak` payload — `Local` / `CloudOnly` / `Downloading` / `Error` / `Missing`. |
+| `metaDownloadState` | State of the `.meta` sidecar — same enum as `downloadState`. The metadata map is trustworthy iff `metaDownloadState == Local`; any other value means `metadata` is empty and only `sourceId` / `timestamp` (from the filename) are populated. Values: `Local` (sidecar on disk, parsed); `Missing` (sidecar absent — mid-write, orphan, or interrupted delete); `CloudOnly` (cloud placeholder skipped to avoid blocking on hydration); `Downloading` (partially hydrated — Apple only); `Error` (open or JSON parse failed). Retention treats anything `!= Local` as **present but unconfirmed** — never pruned, but counted toward bucket occupancy and the min-keep safety net. **Platform asymmetry**: Apple distinguishes all five; Windows collapses `Downloading` into `CloudOnly` (no available attribute); Local backend only produces `Local`/`Missing`/`Error`. |
 
 **DetectedAccount** — entries in `accountsDetected`:
 
@@ -574,37 +574,46 @@ Retention is evaluated **per `sourceId`**. Each source maintains its own indepen
 
 **Pruning applies only to the `sourceId` that just received a successful write** — or the `sourceId` passed to an explicit `prune()`. Backups for other source IDs are never touched. This matters because two devices may share a storage target (e.g. the same iCloud container) running different app versions with different policies; the running app must not impose its policy on the other device's data.
 
-### Cloud-sync caveat — `metadataAvailable`
+### Cloud-sync caveat — `metaDownloadState`
 
-A backup is two files: `.bak` (data) and `.meta` (a JSON sidecar with `sourceId`, `timestamp`, and the application metadata map). The two-file structure is consistent on the writer's filesystem at the moment of writing — see [File-level atomicity](#file-level-atomicity). Cloud sync, however, has **no atomicity across multiple files**: iCloud and OneDrive sync per file, evict per file, and in iOS evictions can be aggressive.
+A backup is two files: `.bak` (data) and `.meta` (a JSON sidecar with `sourceId`, `timestamp`, and the application metadata map). The two-file structure is consistent on the writer's filesystem at the moment of writing — see [File-level atomicity](#file-level-atomicity). Cloud sync, however, has **no atomicity across multiple files**: iCloud and OneDrive sync per file, evict per file, and on iOS evictions can be aggressive.
 
-The consequence: a reader on another device, or the writer after iOS evicts cached content, may observe partial state — `.bak` present without `.meta`, or vice versa. The scanner surfaces these honestly via `BackupInfo.metadataAvailable`:
+The consequence: a reader on another device, or the writer after iOS evicts cached content, may observe partial state — `.bak` present without `.meta`, or one or both as a cloud placeholder. The scanner surfaces these honestly via `BackupInfo.metaDownloadState`, which has the same enum shape as the `.bak`'s `downloadState`:
 
-- **`.bak` with `.meta`**: `metadataAvailable = true`. Standard case.
-- **`.bak` without `.meta`**: `metadataAvailable = false`. The filename still encodes `sourceId` and `timestamp` (so those populate), but the user-supplied metadata map is empty.
+- **`Local`**: `.meta` is on disk and was parsed successfully — `metadata` / `sourceId` / `timestamp` populated from JSON.
+- **`Missing`**: `.meta` is absent (mid-write, orphan, or interrupted delete).
+- **`CloudOnly`**: `.meta` is a cloud placeholder. The scanner deliberately does **not** call `open()` on it — that would block on synchronous hydration through the platform's cloud-files daemon (`bird` on Apple, `cldflt.sys` on Windows) and serialise the entire scan.
+- **`Downloading`**: `.meta` is partially hydrated (Apple only — Windows has no equivalent attribute, so its placeholders collapse into `CloudOnly`).
+- **`Error`**: `.meta` exists but couldn't be opened (permissions, IO) or its JSON failed to parse.
 
-Retention treats `metadataAvailable == false` entries as **present but unconfirmed**:
+Whenever `metaDownloadState != Local`, the user-supplied `metadata` map is empty; the filename regex still yields `sourceId` and `timestamp`.
+
+**Background hydration on Apple.** When the scanner encounters a `CloudOnly` `.meta`, it asks `bird` to fetch it via `startDownloadingUbiquitousItemAtURL:` (fire-and-forget — no wait, no progress). A subsequent `listBackups()` after sync converges will find the sidecar local and report `metaDownloadState = Local`. Without this kick-off, evicted `.meta` would stay perpetually cloud-only and the corresponding `.bak` would be permanently excluded from retention prune (see below) — silently leaking storage over time. Consumers can drive a polling auto-refresh while any row reports `metaDownloadState ∈ {CloudOnly, Downloading}`.
+
+**No equivalent on Windows.** There is no consumer-callable hydration API. The provider-side `CfHydratePlaceholder` is for sync-engine implementers (OneDrive itself), not for code that uses OneDrive as storage. A cloud-only `.meta` on Windows therefore stays `CloudOnly` until something else (user action, separate file access, the OS deciding to repopulate) hydrates it. In practice OneDrive's eviction policy is much less aggressive than iCloud's, so this case is rare — but consumers should be aware that auto-refresh polling on Windows won't converge by itself.
+
+Retention treats `metaDownloadState != Local` as **present but unconfirmed**:
 
 - **Excluded from prune candidates.** Not enough information to decide; safer to leave alone until a future scan.
 - **Counted toward bucket occupancy.** A day with only a metadata-pending backup still counts as "this day has backups" for the purpose of N.
 - **Counted toward the minimum-keep safety net.** Real files representing real backup data; their existence prevents retention from concluding "we have no backups".
 
-Consequence: a mid-sync backup is left alone on this prune pass and gets full treatment on the next scan, once the `.meta` has arrived (or been hydrated). Consumers that need an atomic single-unit backup can embed any application metadata directly in the `.bak` payload — the library's `.meta` sidecar is reserved for library bookkeeping and is best-effort under cloud sync.
+Consumers that need an atomic single-unit backup can embed any application metadata directly in the `.bak` payload — the library's `.meta` sidecar is reserved for library bookkeeping and is best-effort under cloud sync.
 
 ### Minimum-keep safety invariant
 
 If the policy would prune every backup for the active `sourceId`, the latest one is retained anyway. A warning is logged on the `qtcloudbackup.retention` logging category. This makes a misconfigured all-zero policy non-catastrophic.
 
-If there are any `metadataAvailable = false` entries (mid-sync, evicted), the safety net is already satisfied — those entries are never pruned and represent real backup data, so no force-keep of confirmed entries is needed.
+If there are any `metaDownloadState != Local` entries (mid-sync, evicted, cloud-only), the safety net is already satisfied — those entries are never pruned and represent real backup data, so no force-keep of confirmed entries is needed.
 
 ## File-level atomicity
 
 The library maintains a **writer-local invariant**: at the moment a write or delete returns, the writer's local filesystem holds either both files or neither.
 
 - **Writes** are `.bak` first, then `.meta`. If the `.meta` write fails after the `.bak` succeeded, the `.bak` is rolled back. All three backends behave the same way.
-- **Deletes** are `.meta` first, then `.bak`. If the delete is interrupted between the two removals, what remains is an orphan `.bak` — surfaced by the scanner with `metadataAvailable = false` rather than left invisible.
+- **Deletes** are `.meta` first, then `.bak`. If the delete is interrupted between the two removals, what remains is an orphan `.bak` — surfaced by the scanner with `metaDownloadState = Missing` rather than left invisible.
 
-This invariant holds **only** at the writer's local filesystem at write/delete time. Cross-device consistency under cloud sync is not guaranteed in real time — see [the cloud-sync caveat](#cloud-sync-caveat--metadataavailable).
+This invariant holds **only** at the writer's local filesystem at write/delete time. Cross-device consistency under cloud sync is not guaranteed in real time — see [the cloud-sync caveat](#cloud-sync-caveat--metadownloadstate).
 
 ## Orphaned backup migration
 
@@ -678,7 +687,7 @@ The API is shaped to support future multi-backend builds (e.g. iCloud + Local on
 
 - **Duplicate filenames**: files already present in the active location are skipped (likely from a previous partial migration).
 - **Partial failure**: migration continues past individual errors, reports `MigrationFailed` with the count of successes, and leaves failed originals in place for retry.
-- **Cloud-sync partial state**: orphan accounts often go unsynced for longer than the active account, so partial states (`.bak` present, `.meta` not yet synced, or vice versa) are more common when scanning orphans. The `metadataAvailable` flag on `BackupInfo` applies here too; consumers presenting an orphan migration UI should expect the listing to evolve as cloud sync converges.
+- **Cloud-sync partial state**: orphan accounts often go unsynced for longer than the active account, so partial states (`.bak` present, `.meta` not yet synced, or vice versa) are more common when scanning orphans. `OrphanedBackupInfo` doesn't carry a `metaDownloadState` field — orphan rows with a cloud-only or missing `.meta` simply have an empty `metadata` map, with `sourceId` and `timestamp` populated from the filename. Consumers presenting an orphan migration UI should expect the listing to evolve as cloud sync converges.
 - **A `Disabled` / `Unavailable` account as orphan source**: skipped — orphans are only discoverable from accessible accounts.
 
 ## Known limitations
