@@ -520,19 +520,43 @@ void AppleICloudBackend::scanBackups()
                     info.downloadState = QtCloudBackup::DownloadState::Downloading;
                 }
 
-                // Try to read .meta sidecar (bounded). A missing .meta is
-                // not junk under cloud sync — it may be syncing, evicted, or
-                // a stale orphan. Surface honestly via metadataAvailable=false.
+                // Try to read .meta sidecar (bounded). A missing or
+                // cloud-only .meta is not junk under cloud sync — it may be
+                // syncing, evicted, or a stale orphan. Surface honestly via
+                // metadataAvailable=false rather than blocking on hydration.
                 QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
-                QFile metaFile(metaPath);
-                if (metaFile.open(QIODevice::ReadOnly)) {
-                    QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
-                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                    info.timestamp = QDateTime::fromString(
-                        meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
-                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
+
+                // Probe the .meta download status. Skip open() unless the
+                // file is fully local — otherwise QFile::open() blocks on
+                // bird hydration, serialising the whole scan.
+                NSString *metaStatus = nil;
+                [metaUrl getResourceValue:&metaStatus
+                                   forKey:NSURLUbiquitousItemDownloadingStatusKey
+                                    error:nil];
+                const bool metaLocal = !metaStatus ||
+                    [metaStatus isEqual:NSURLUbiquitousItemDownloadingStatusCurrent];
+
+                if (metaLocal) {
+                    QFile metaFile(metaPath);
+                    if (metaFile.open(QIODevice::ReadOnly)) {
+                        QJsonObject meta = QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
+                        info.sourceId = meta[QStringLiteral("sourceId")].toString();
+                        info.timestamp = QDateTime::fromString(
+                            meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
+                        info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+                    } else {
+                        info.metadataAvailable = false;
+                    }
                 } else {
                     info.metadataAvailable = false;
+                    // Fire-and-forget background hydration so a subsequent
+                    // scan finds the sidecar local. Without this, evicted
+                    // .meta files would stay perpetually cloud-only and
+                    // their .bak would be permanently excluded from prune
+                    // candidates (retention-correctness corollary).
+                    [[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:metaUrl
+                                                                                  error:nil];
                 }
 
                 // Fallback: parse filename (always needed when .meta is
