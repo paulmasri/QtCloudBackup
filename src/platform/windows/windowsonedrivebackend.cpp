@@ -456,41 +456,34 @@ void WindowsOneDriveBackend::scanBackups()
                 info.downloadState = QtCloudBackup::DownloadState::Local;
             }
 
-            // Try to read .meta sidecar (bounded). A missing or cloud-only
-            // .meta is not junk under cloud sync — surface honestly via
-            // metaDownloadState rather than blocking on hydration.
-            //
-            // Probe FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS on the .meta path
-            // first. If set, the file is a OneDrive cloud placeholder;
-            // QFile::open() would trigger synchronous hydration via the
-            // cloud-files filter driver and block the entire scan. Mark as
-            // CloudOnly and skip the open. No consumer-facing API to
-            // request background hydration on Windows (CfHydratePlaceholder
-            // is provider-only), so this row will stay CloudOnly until
-            // something else hydrates the file.
+            // Read the .meta sidecar (bounded). Windows deliberately does
+            // NOT skip-and-mark cloud-only placeholders the way the Apple
+            // backend does — on Windows we have no consumer-callable
+            // hydration API (CfHydratePlaceholder is provider-only), so a
+            // skip would leave the row perpetually cloud-only and break
+            // retention correctness (excluded from prune indefinitely).
+            // Always opening pays first-scan latency on a new PC where
+            // everything is a placeholder, but each row recovers to Local
+            // afterwards. Per-file cost on OneDrive is small enough (~0.3s
+            // measured) that linear scaling is acceptable.
             QString metaPath = dir + QLatin1Char('/') + backupStem(entry) + QStringLiteral(".meta");
-            DWORD metaAttrs = GetFileAttributesW(reinterpret_cast<LPCWSTR>(metaPath.utf16()));
-            if (metaAttrs == INVALID_FILE_ATTRIBUTES) {
-                info.metaDownloadState = QtCloudBackup::DownloadState::Missing;
-            } else if (metaAttrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) {
-                info.metaDownloadState = QtCloudBackup::DownloadState::CloudOnly;
-            } else {
-                QFile metaFile(metaPath);
-                if (metaFile.open(QIODevice::ReadOnly)) {
-                    QJsonParseError parseError;
-                    QJsonObject meta = QJsonDocument::fromJson(
-                        metaFile.read(MaxMetaFileSize), &parseError).object();
-                    if (parseError.error != QJsonParseError::NoError) {
-                        info.metaDownloadState = QtCloudBackup::DownloadState::Error;
-                    } else {
-                        info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                        info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
-                                                                Qt::ISODateWithMs);
-                        info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
-                    }
-                } else {
+            QFile metaFile(metaPath);
+            if (metaFile.open(QIODevice::ReadOnly)) {
+                QJsonParseError parseError;
+                QJsonObject meta = QJsonDocument::fromJson(
+                    metaFile.read(MaxMetaFileSize), &parseError).object();
+                if (parseError.error != QJsonParseError::NoError) {
                     info.metaDownloadState = QtCloudBackup::DownloadState::Error;
+                } else {
+                    info.sourceId = meta[QStringLiteral("sourceId")].toString();
+                    info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
+                                                            Qt::ISODateWithMs);
+                    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
                 }
+            } else {
+                info.metaDownloadState = QFileInfo::exists(metaPath)
+                    ? QtCloudBackup::DownloadState::Error
+                    : QtCloudBackup::DownloadState::Missing;
             }
 
             // Fallback: parse filename (always needed when .meta is missing,
@@ -603,17 +596,11 @@ void WindowsOneDriveBackend::scanOrphanedBackups()
 
                 const QString metaPath = src.scanDir + QLatin1Char('/')
                     + backupStem(entry) + QStringLiteral(".meta");
-                // Skip the open() if .meta is a OneDrive cloud placeholder
-                // — otherwise QFile::open() blocks on hydration and freezes
-                // the orphan scan. OrphanedBackupInfo doesn't carry a
-                // metaDownloadState field, so the consumer just sees empty
-                // metadata; the filename regex below still yields sourceId
-                // and timestamp.
-                DWORD metaAttrs = GetFileAttributesW(reinterpret_cast<LPCWSTR>(metaPath.utf16()));
-                const bool metaSkip = (metaAttrs != INVALID_FILE_ATTRIBUTES
-                                       && (metaAttrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS));
+                // Always open() — see scanBackups() rationale: skip-and-mark
+                // on Windows would leave the row perpetually cloud-only
+                // (no consumer-callable hydration API on Windows).
                 QFile metaFile(metaPath);
-                if (!metaSkip && metaFile.open(QIODevice::ReadOnly)) {
+                if (metaFile.open(QIODevice::ReadOnly)) {
                     const QJsonObject meta =
                         QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize)).object();
                     info.sourceId = meta[QStringLiteral("sourceId")].toString();
