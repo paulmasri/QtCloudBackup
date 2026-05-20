@@ -11,9 +11,7 @@ public:
 
     void detect() override;
     void select(const AccountId &id) override;
-    std::optional<AccountId> resolveAccount(QtCloudBackup::StorageType type,
-                                            const QString &tenantId,
-                                            const QString &email) const override;
+    std::optional<AccountId> resolveAccount(const DurableAccountIdentity &identity) const override;
     QtCloudBackup::StorageStatus storageStatus() const override;
     QString statusDetail() const override;
     QtCloudBackup::StorageType storageType() const override;

@@ -185,11 +185,9 @@ void AppleICloudBackend::select(const AccountId &id)
     });
 }
 
-std::optional<AccountId> AppleICloudBackend::resolveAccount(QtCloudBackup::StorageType type,
-                                                            const QString & /*tenantId*/,
-                                                            const QString & /*email*/) const
+std::optional<AccountId> AppleICloudBackend::resolveAccount(const DurableAccountIdentity &identity) const
 {
-    if (type != QtCloudBackup::StorageType::ICloud)
+    if (identity.type != QtCloudBackup::StorageType::ICloud)
         return std::nullopt;
     // Apple: single-instance platform. Resolution succeeds iff detect() saw
     // a Ready iCloud account — i.e. token present AND container URL resolved.

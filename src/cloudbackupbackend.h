@@ -47,15 +47,12 @@ public:
     virtual void select(const AccountId &id) = 0;
 
     // Synchronous resolver over the cached `detect()` result. Returns the
-    // current `AccountId` for an account previously persisted by its durable
-    // identity (`StorageType` + optional `tenantId` for Business + optional
-    // `email`), or `nullopt` if no matching account is currently detected.
-    // Consumers persist the durable identity (NOT `accountKey`) and call this
-    // at startup to recover the slot.
+    // current `AccountId` for an account previously persisted as a
+    // `DurableAccountIdentity`, or `nullopt` if no matching account is
+    // currently detected. Consumers persist the durable identity (NOT
+    // `accountKey`) and call this at startup to recover the slot.
     virtual std::optional<AccountId> resolveAccount(
-        QtCloudBackup::StorageType type,
-        const QString &tenantId,
-        const QString &email) const = 0;
+        const DurableAccountIdentity &identity) const = 0;
 
     virtual QtCloudBackup::StorageStatus storageStatus() const = 0;
     virtual QString statusDetail() const = 0;

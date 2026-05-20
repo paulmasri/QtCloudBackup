@@ -41,19 +41,16 @@ public:
     // Stage 1: enumerate candidate accounts. Result delivered via
     // accountsDetected. See the backend interface for full semantics.
     Q_INVOKABLE void detect();
-    // Stage 2: activate the chosen account. `accountKey` comes from the
-    // DetectedAccount.id.accountKey of the entry the user picked (or from
-    // resolveAccount()). Pass an empty string for single-instance platforms
-    // (Apple, Local).
-    Q_INVOKABLE void select(QtCloudBackup::StorageType type, const QString &accountKey);
-    // Resolves a persisted durable identity (StorageType + tenantId + email)
-    // to the current in-memory AccountId, against the most recent detect()
-    // result. Returns an empty map if no matching account is currently
-    // detected; otherwise { "type": int, "accountKey": string } suitable
-    // for passing to select().
-    Q_INVOKABLE QVariantMap resolveAccount(QtCloudBackup::StorageType type,
-                                           const QString &tenantId,
-                                           const QString &email) const;
+    // Stage 2: activate the chosen account. `id` comes from the
+    // DetectedAccount.id of the entry the user picked, or from
+    // resolveAccount().
+    Q_INVOKABLE void select(const AccountId &id);
+    // Resolves a persisted `DurableAccountIdentity` (StorageType + tenantId
+    // + email) to the current in-memory AccountId, against the most recent
+    // detect() result. Returns an empty map if no matching account is
+    // currently detected; otherwise { "type": int, "accountKey": string }
+    // suitable for passing to select().
+    Q_INVOKABLE QVariantMap resolveAccount(const DurableAccountIdentity &identity) const;
     Q_INVOKABLE void prune(const QString &sourceId);
     Q_INVOKABLE void checkForOrphanedBackups();
     Q_INVOKABLE void migrateOrphanedBackups();

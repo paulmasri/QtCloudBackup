@@ -120,11 +120,9 @@ void LocalBackend::select(const AccountId &id)
     });
 }
 
-std::optional<AccountId> LocalBackend::resolveAccount(QtCloudBackup::StorageType type,
-                                                     const QString & /*tenantId*/,
-                                                     const QString & /*email*/) const
+std::optional<AccountId> LocalBackend::resolveAccount(const DurableAccountIdentity &identity) const
 {
-    if (type != QtCloudBackup::StorageType::LocalDirectory)
+    if (identity.type != QtCloudBackup::StorageType::LocalDirectory)
         return std::nullopt;
     // Single-instance platform. Resolution succeeds iff detect() saw a Ready
     // local entry.

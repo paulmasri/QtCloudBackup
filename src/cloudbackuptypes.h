@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QMetaType>
+#include <QObject>
 #include <QString>
 #include <QtQml/qqmlregistration.h>
 
@@ -113,3 +115,50 @@ enum class BackupError {
 Q_ENUM_NS(BackupError)
 
 } // namespace QtCloudBackup
+
+// Persistable account identity — the durable counterpart to `AccountId`.
+//
+// `AccountId` is the in-memory stage-2 handle returned by `detect()`. Its
+// `accountKey` is a platform slot name (OneDrive: "Personal", "Business1",
+// ...) that is NOT stable across unlink/re-add cycles. Persisting it can
+// silently re-point at the wrong account.
+//
+// `DurableAccountIdentity` is the value the consumer should persist:
+//   StorageType   the backend (ICloud / OneDrivePersonal / OneDriveCommercial
+//                 / LocalDirectory).
+//   tenantId      Microsoft Entra tenant GUID for OneDrive Business; empty
+//                 for Personal / Apple / Local.
+//   email         Account email; empty for Apple and Local.
+//
+// At startup the consumer passes this to `CloudBackupManager::resolveAccount`
+// to recover the current `AccountId` from the live `detect()` result.
+class DurableAccountIdentity {
+    Q_GADGET
+    Q_PROPERTY(QtCloudBackup::StorageType type MEMBER type FINAL)
+    Q_PROPERTY(QString tenantId MEMBER tenantId FINAL)
+    Q_PROPERTY(QString email MEMBER email FINAL)
+
+public:
+    QtCloudBackup::StorageType type = QtCloudBackup::StorageType::None;
+    QString tenantId;
+    QString email;
+
+    bool isEmpty() const
+    {
+        return type == QtCloudBackup::StorageType::None
+            && tenantId.isEmpty() && email.isEmpty();
+    }
+
+    friend bool operator==(const DurableAccountIdentity &a,
+                           const DurableAccountIdentity &b)
+    {
+        return a.type == b.type && a.tenantId == b.tenantId && a.email == b.email;
+    }
+    friend bool operator!=(const DurableAccountIdentity &a,
+                           const DurableAccountIdentity &b)
+    {
+        return !(a == b);
+    }
+};
+
+Q_DECLARE_METATYPE(DurableAccountIdentity)
