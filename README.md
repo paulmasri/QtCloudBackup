@@ -185,7 +185,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 
 ### Enums
 
-**StorageStatus**: `Unknown`, `Ready`, `Unavailable`, `Disabled`, `LocalFallback`
+**StorageStatus**: `Unknown`, `Ready`, `Unavailable`, `Disabled`, `LocalActive`
 
 **StorageType**: `None`, `ICloud`, `OneDrivePersonal`, `OneDriveCommercial`, `LocalDirectory`
 
@@ -423,7 +423,7 @@ CloudBackupManager {
 | `Ready` | Storage is available and writable. Per-`DetectedAccount` during detection: "selectable". After `select()`: "the active target is up". | — |
 | `Unavailable` | Storage is not configured. User can complete setup (install client / sign in / enable service). | User |
 | `Disabled` | Storage is configured-but-blocked by something outside the user's control (IT policy, missing entitlements, unlicensed account, tenant restriction). | Nobody locally |
-| `LocalFallback` | Backend is using a local directory in lieu of cloud sync. Only ever assigned when the consumer explicitly selects `LocalDirectory` — never automatic. | — |
+| `LocalActive` | Local backend is the active selection. Only ever assigned when the consumer explicitly selects `LocalDirectory` — never automatic, hence "active" rather than "fallback". | — |
 
 UI implication: `Disabled` rows should explain the situation without inviting a sign-in attempt; `Unavailable` rows should prompt setup.
 
@@ -454,7 +454,7 @@ UI implication: `Disabled` rows should explain the situation without inviting a 
 |---|---|
 | Backup directory writable | `Ready` |
 | Not writable | `Unavailable` |
-| Successfully selected | `LocalFallback` |
+| Successfully selected | `LocalActive` |
 
 ### Known limitation: Apple MDM-restricted
 

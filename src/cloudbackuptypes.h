@@ -40,9 +40,10 @@ QML_NAMED_ELEMENT(CloudBackup)
 //                 (`DisableFileSyncNGSC` device-level, `DisablePersonalSync`
 //                 personal, `AllowTenantList`/`BlockTenantList` business).
 //
-//   LocalFallback Storage backend is using a local directory in lieu of cloud
-//                 sync. Only meaningful as an explicitly-selected target; the
-//                 library never assigns this as an automatic last resort.
+//   LocalActive   Local backend is the active selection. Only ever assigned
+//                 when the consumer explicitly selects `LocalDirectory`;
+//                 the library never assigns this as an automatic last
+//                 resort, hence "active" rather than "fallback".
 //
 // Known limitation (Apple): MDM-restricted devices are not distinguished from
 // signed-out / iCloud-Drive-off — both collapse into `Unavailable`. The
@@ -54,7 +55,7 @@ enum class StorageStatus {
     Ready,
     Unavailable,
     Disabled,
-    LocalFallback
+    LocalActive
 };
 Q_ENUM_NS(StorageStatus)
 

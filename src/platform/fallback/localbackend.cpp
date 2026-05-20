@@ -72,7 +72,7 @@ void LocalBackend::select(const AccountId &id)
         return;
     }
 
-    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::LocalFallback)
+    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::LocalActive)
         return; // reentrant no-op
 
     const int genAtStart = m_detectionGeneration;
@@ -80,10 +80,10 @@ void LocalBackend::select(const AccountId &id)
     QPointer<LocalBackend> self(this);
     (void)QtConcurrent::run([self, id, genAtStart, dir] {
         // Actual mkpath — the side effect deferred out of detect(). On
-        // success the backend reports LocalFallback rather than Ready: the
-        // consumer chose this explicitly (per spec, LocalFallback is never
-        // assigned automatically as a last resort) and the status signals
-        // "you are on local storage, not cloud sync".
+        // success the backend reports LocalActive rather than Ready: the
+        // consumer chose local storage explicitly (per spec, this state
+        // is never assigned automatically as a last resort) and the
+        // status signals "you are on local storage, not cloud sync".
         QDir d(dir);
         const bool ok = d.exists() || d.mkpath(QStringLiteral("."));
 
@@ -107,7 +107,7 @@ void LocalBackend::select(const AccountId &id)
             }
             if (ok) {
                 self->m_selectedId = id;
-                self->m_status = QtCloudBackup::StorageStatus::LocalFallback;
+                self->m_status = QtCloudBackup::StorageStatus::LocalActive;
                 self->m_statusDetail = LocalBackend::tr("Using local storage");
                 emit self->statusChanged(self->m_status, self->m_statusDetail);
             } else {
