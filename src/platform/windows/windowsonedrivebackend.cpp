@@ -251,12 +251,10 @@ void WindowsOneDriveBackend::select(const AccountId &id)
     });
 }
 
-std::optional<AccountId> WindowsOneDriveBackend::resolveAccount(QtCloudBackup::StorageType type,
-                                                                const QString &tenantId,
-                                                                const QString &email) const
+std::optional<AccountId> WindowsOneDriveBackend::resolveAccount(const DurableAccountIdentity &identity) const
 {
-    if (type != QtCloudBackup::StorageType::OneDrivePersonal
-        && type != QtCloudBackup::StorageType::OneDriveCommercial) {
+    if (identity.type != QtCloudBackup::StorageType::OneDrivePersonal
+        && identity.type != QtCloudBackup::StorageType::OneDriveCommercial) {
         return std::nullopt;
     }
     // Durable identity: Personal matches by email only (MSAs have no tenant);
@@ -264,14 +262,14 @@ std::optional<AccountId> WindowsOneDriveBackend::resolveAccount(QtCloudBackup::S
     // OneDrive may re-slot the same account at a different index across
     // unlink/re-add, so we must not consult the persisted accountKey.
     for (const auto &a : m_lastDetection) {
-        if (a.id.type != type)
+        if (a.id.type != identity.type)
             continue;
-        const bool emailMatch = a.email.compare(email, Qt::CaseInsensitive) == 0;
-        if (type == QtCloudBackup::StorageType::OneDrivePersonal) {
+        const bool emailMatch = a.email.compare(identity.email, Qt::CaseInsensitive) == 0;
+        if (identity.type == QtCloudBackup::StorageType::OneDrivePersonal) {
             if (emailMatch)
                 return a.id;
         } else {
-            const bool tenantMatch = a.tenantId.compare(tenantId, Qt::CaseInsensitive) == 0;
+            const bool tenantMatch = a.tenantId.compare(identity.tenantId, Qt::CaseInsensitive) == 0;
             if (tenantMatch && emailMatch)
                 return a.id;
         }

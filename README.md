@@ -159,8 +159,8 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
 | `deleteBackup(filename)` | Delete a backup and its metadata sidecar |
 | `detect()` | Stage 1: enumerate candidate accounts. No filesystem side effects. Result delivered via `accountsDetected`. See [Storage lifecycle](#storage-lifecycle). |
-| `select(type, accountKey)` | Stage 2: activate the chosen account (creates the backup subdirectory; brings up platform machinery). Status delivered via `statusChanged`. Reentrant — switching does not migrate existing backups. |
-| `resolveAccount(type, tenantId, email)` | Maps a persisted durable identity to the current in-memory `AccountId`. Returns an empty map if the account is no longer detected; otherwise `{ type, accountKey }`. Pair with `select()` to reconnect to a saved choice. |
+| `select(id)` | Stage 2: activate the chosen account. `id` is the `AccountId` from a `DetectedAccount.id` (or the resolved id from `resolveAccount`). Creates the backup subdirectory; brings up platform machinery. Status delivered via `statusChanged`. Reentrant — switching does not migrate existing backups. |
+| `resolveAccount(identity)` | Maps a persisted `DurableAccountIdentity` to the current in-memory `AccountId`. Returns an empty map if the account is no longer detected; otherwise `{ type, accountKey }` suitable for passing to `select()`. |
 | `prune(sourceId)` | Apply the current `retentionPolicy` to `sourceId` immediately. Useful after a policy change. No-op while a backup is in progress. |
 | `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
@@ -185,7 +185,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 
 ### Enums
 
-**StorageStatus**: `Unknown`, `Ready`, `Unavailable`, `Disabled`, `LocalFallback`
+**StorageStatus**: `Unknown`, `Ready`, `Unavailable`, `Disabled`, `LocalActive`
 
 **StorageType**: `None`, `ICloud`, `OneDrivePersonal`, `OneDriveCommercial`, `LocalDirectory`
 
@@ -236,7 +236,17 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | Field | Description |
 |-------|-------------|
 | `type` | `StorageType` of the account. |
-| `accountKey` | Slot name (e.g. `"Business2"`, `"Personal"`, or `""`). **In-memory only — do not persist.** OneDrive may re-slot the same account at a different index across unlink/re-add, so a saved `accountKey` may resolve to the wrong account or to nothing. Persist `(StorageType, tenantId, email)` and call `resolveAccount()` at startup. |
+| `accountKey` | Slot name (e.g. `"Business2"`, `"Personal"`, or `""`). **In-memory only — do not persist.** OneDrive may re-slot the same account at a different index across unlink/re-add, so a saved `accountKey` may resolve to the wrong account or to nothing. Persist a `DurableAccountIdentity` and call `resolveAccount()` at startup. |
+
+**DurableAccountIdentity** — the persistable account identity. Pair to `AccountId`:
+
+| Field | Description |
+|-------|-------------|
+| `type` | `StorageType`. |
+| `tenantId` | Microsoft Entra tenant GUID for OneDrive Business; empty for Personal / Apple / Local. |
+| `email` | Account email; empty for Apple and Local. |
+
+Persist this value (as JSON, settings, etc.) and pass it to `resolveAccount()` at startup to recover the current `AccountId`. Lives in `cloudbackuptypes.h`, available to consumers that link only the slim `QtCloudBackupTypes` static target.
 
 ## QML usage example
 
@@ -291,7 +301,7 @@ Item {
     onAccountsDetected: (accounts) => {
         for (let i = 0; i < accounts.length; i++) {
             if (accounts[i].status === CloudBackup.StorageStatus.Ready) {
-                backupManager.select(accounts[i].id.type, accounts[i].id.accountKey)
+                backupManager.select(accounts[i].id)
                 return
             }
         }
@@ -338,7 +348,7 @@ connect(manager, &CloudBackupManager::accountsDetected, this,
         [manager](const QList<DetectedAccount> &accounts) {
     for (const auto &a : accounts) {
         if (a.status == QtCloudBackup::StorageStatus::Ready) {
-            manager->select(a.id.type, a.id.accountKey);
+            manager->select(a.id);
             return;
         }
     }
@@ -364,19 +374,21 @@ manager->listBackups();
 Construction of `CloudBackupManager` is side-effect-free — no registry reads, no filesystem touches. The consumer drives the lifecycle in two stages:
 
 1. **`detect()`** — enumerates candidate accounts. Result delivered asynchronously via `accountsDetected(QList<DetectedAccount>)`. No filesystem writes; no folder creation.
-2. **`select(type, accountKey)`** — activates one of the detected accounts. Creates the backup subdirectory, brings up platform machinery (e.g. iCloud's `NSMetadataQuery`), and emits `statusChanged` with the result.
+2. **`select(id)`** — activates one of the detected accounts (`id` is the `AccountId` from a `DetectedAccount.id`). Creates the backup subdirectory, brings up platform machinery (e.g. iCloud's `NSMetadataQuery`), and emits `statusChanged` with the result.
 
 Typical startup flow with a persisted user preference:
 
 ```cpp
 connect(manager, &CloudBackupManager::accountsDetected, this,
-    [manager, savedType, savedTenantId, savedEmail](auto) {
-        const QVariantMap id = manager->resolveAccount(savedType, savedTenantId, savedEmail);
-        if (!id.isEmpty())
-            manager->select(QtCloudBackup::StorageType(id["type"].toInt()),
-                            id["accountKey"].toString());
-        else
+    [manager, savedIdentity /* DurableAccountIdentity */](auto) {
+        const QVariantMap id = manager->resolveAccount(savedIdentity);
+        if (!id.isEmpty()) {
+            AccountId resolved{ QtCloudBackup::StorageType(id["type"].toInt()),
+                                id["accountKey"].toString() };
+            manager->select(resolved);
+        } else {
             showPicker();  // saved account no longer detected
+        }
     });
 manager->detect();
 ```
@@ -386,10 +398,12 @@ Or in QML:
 ```qml
 CloudBackupManager {
     id: backupManager
+    // savedIdentity is a DurableAccountIdentity-shaped object literal:
+    //   { type: ..., tenantId: "...", email: "..." }
     onAccountsDetected: (accounts) => {
-        const id = backupManager.resolveAccount(savedType, savedTenantId, savedEmail)
+        const id = backupManager.resolveAccount(savedIdentity)
         if (id.type !== undefined)
-            backupManager.select(id.type, id.accountKey)
+            backupManager.select(id)
         else
             picker.open()
     }
@@ -409,7 +423,7 @@ CloudBackupManager {
 | `Ready` | Storage is available and writable. Per-`DetectedAccount` during detection: "selectable". After `select()`: "the active target is up". | — |
 | `Unavailable` | Storage is not configured. User can complete setup (install client / sign in / enable service). | User |
 | `Disabled` | Storage is configured-but-blocked by something outside the user's control (IT policy, missing entitlements, unlicensed account, tenant restriction). | Nobody locally |
-| `LocalFallback` | Backend is using a local directory in lieu of cloud sync. Only ever assigned when the consumer explicitly selects `LocalDirectory` — never automatic. | — |
+| `LocalActive` | Local backend is the active selection. Only ever assigned when the consumer explicitly selects `LocalDirectory` — never automatic, hence "active" rather than "fallback". | — |
 
 UI implication: `Disabled` rows should explain the situation without inviting a sign-in attempt; `Unavailable` rows should prompt setup.
 
@@ -440,7 +454,7 @@ UI implication: `Disabled` rows should explain the situation without inviting a 
 |---|---|
 | Backup directory writable | `Ready` |
 | Not writable | `Unavailable` |
-| Successfully selected | `LocalFallback` |
+| Successfully selected | `LocalActive` |
 
 ### Known limitation: Apple MDM-restricted
 

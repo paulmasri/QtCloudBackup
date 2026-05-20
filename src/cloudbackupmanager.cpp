@@ -268,16 +268,14 @@ void CloudBackupManager::detect()
     m_backend->detect();
 }
 
-void CloudBackupManager::select(QtCloudBackup::StorageType type, const QString &accountKey)
+void CloudBackupManager::select(const AccountId &id)
 {
-    m_backend->select({ type, accountKey });
+    m_backend->select(id);
 }
 
-QVariantMap CloudBackupManager::resolveAccount(QtCloudBackup::StorageType type,
-                                               const QString &tenantId,
-                                               const QString &email) const
+QVariantMap CloudBackupManager::resolveAccount(const DurableAccountIdentity &identity) const
 {
-    const auto id = m_backend->resolveAccount(type, tenantId, email);
+    const auto id = m_backend->resolveAccount(identity);
     if (!id)
         return {};
     return {
