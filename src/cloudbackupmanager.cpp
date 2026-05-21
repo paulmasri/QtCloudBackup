@@ -313,6 +313,12 @@ DurableAccountIdentity CloudBackupManager::makeDurableAccountIdentity(
     return { type, tenantId, email };
 }
 
+AccountId CloudBackupManager::makeAccountId(
+    QtCloudBackup::StorageType type, const QString &accountKey) const
+{
+    return { type, accountKey };
+}
+
 void CloudBackupManager::pruneBackups(const QString &sourceId)
 {
     // Guard against re-entrancy from explicit prune() calls during an

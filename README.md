@@ -166,6 +166,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
 | `makeRetentionPolicy(keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly)` | Factory for constructing a `RetentionPolicy` from QML — gadget value types can't be assembled via JS-object literals. See [QML usage example](#qml-usage-example). |
 | `makeDurableAccountIdentity(type, tenantId, email)` | Factory for constructing a `DurableAccountIdentity` from QML — same root cause as `makeRetentionPolicy`. Pair with `resolveAccount()` to rehydrate a persisted choice. |
+| `makeAccountId(type, accountKey)` | Factory for constructing an `AccountId` from QML. Needed when a picker stores accounts in a `ListModel` — `append()` serialises gadget-typed roles, so `model.id` read back is no longer an `AccountId`. Pass `model.type` and `model.accountKey` through this factory and into `select()`. |
 
 ### Signals
 
