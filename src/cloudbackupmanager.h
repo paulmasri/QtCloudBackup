@@ -74,6 +74,18 @@ public:
         QtCloudBackup::StorageType type = QtCloudBackup::StorageType::None,
         const QString &tenantId = {},
         const QString &email = {}) const;
+    // Factory for constructing an AccountId from QML. Same root cause as
+    // makeDurableAccountIdentity / makeRetentionPolicy: gadgets can't
+    // round-trip through JS object form. The common case is a picker
+    // backed by a ListModel — append() serialises gadget-typed roles, so
+    // `model.id` read back from a row is a plain object, not an AccountId.
+    // Reconstruct on the way into select():
+    //   backupManager.select(
+    //       backupManager.makeAccountId(model.type, model.accountKey))
+    // C++ consumers can use aggregate initialisation directly.
+    Q_INVOKABLE AccountId makeAccountId(
+        QtCloudBackup::StorageType type = QtCloudBackup::StorageType::None,
+        const QString &accountKey = {}) const;
 
 signals:
     void storageStatusChanged();
