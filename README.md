@@ -246,7 +246,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `tenantId` | Microsoft Entra tenant GUID for OneDrive Business; empty for Personal / Apple / Local. |
 | `email` | Account email; empty for Apple and Local. |
 
-Persist this value (as JSON, settings, etc.) and pass it to `resolveAccount()` at startup to recover the current `AccountId`. Lives in `cloudbackuptypes.h`, available to consumers that link only the slim `QtCloudBackupTypes` static target.
+Persist this value (as JSON, settings, etc.) and pass it to `resolveAccount()` at startup to recover the current `AccountId`.
 
 ## QML usage example
 

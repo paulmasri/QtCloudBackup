@@ -29,26 +29,11 @@ if(QTCLOUDBACKUP_WINDOWS_BACKUP_PATH STREQUAL "Personal Vault")
         "subfolder name.")
 endif()
 
-# Slim enum-only static target. Consumers that only need the public enums
-# (e.g. to persist a StorageType) can link this alone — no platform code,
-# no manager. The full QtCloudBackup target PUBLIC-links it so existing
-# consumers see the enums via #include <backupinfo.h> unchanged.
-qt_add_library(QtCloudBackupTypes STATIC
-    src/cloudbackuptypes.h
-)
-target_include_directories(QtCloudBackupTypes PUBLIC src)
-target_link_libraries(QtCloudBackupTypes PUBLIC Qt6::Core Qt6::Qml)
-qt_add_qml_module(QtCloudBackupTypes
-    URI QtCloudBackup.Types
-    VERSION 1.0
-    RESOURCE_PREFIX /
-    OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/QtCloudBackup/Types
-)
-
 set(SOURCES
     src/cloudbackupmanager.h
     src/cloudbackupmanager.cpp
     src/cloudbackupbackend.h
+    src/cloudbackuptypes.h
     src/backupinfo.h
     src/backupvalidation.h
     src/retentionpolicy.h
@@ -79,7 +64,7 @@ qt_add_library(QtCloudBackup STATIC ${SOURCES})
 
 target_include_directories(QtCloudBackup PUBLIC src)
 
-target_link_libraries(QtCloudBackup PUBLIC Qt6::Core Qt6::Qml QtCloudBackupTypes PRIVATE Qt6::Concurrent)
+target_link_libraries(QtCloudBackup PUBLIC Qt6::Core Qt6::Qml PRIVATE Qt6::Concurrent)
 
 target_compile_definitions(QtCloudBackup PRIVATE
     QTCLOUDBACKUP_APP_NAME="${QTCLOUDBACKUP_APP_NAME}"
@@ -102,10 +87,10 @@ qt_add_qml_module(QtCloudBackup
     URI QtCloudBackup
     VERSION 1.0
     RESOURCE_PREFIX /
-    IMPORTS QtCloudBackup.Types
     SOURCES
         src/cloudbackupmanager.h
         src/cloudbackupmanager.cpp
+        src/cloudbackuptypes.h
         src/backupinfo.h
         src/retentionpolicy.h
 )
