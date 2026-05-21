@@ -160,7 +160,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `deleteBackup(filename)` | Delete a backup and its metadata sidecar |
 | `detect()` | Stage 1: enumerate candidate accounts. No filesystem side effects. Result delivered via `accountsDetected`. See [Storage lifecycle](#storage-lifecycle). |
 | `select(id)` | Stage 2: activate the chosen account. `id` is the `AccountId` from a `DetectedAccount.id` (or the resolved id from `resolveAccount`). Creates the backup subdirectory; brings up platform machinery. Status delivered via `statusChanged`. Reentrant — switching does not migrate existing backups. |
-| `resolveAccount(identity)` | Maps a persisted `DurableAccountIdentity` to the current in-memory `AccountId`. Returns an empty map if the account is no longer detected; otherwise `{ type, accountKey }` suitable for passing to `select()`. |
+| `resolveAccount(identity)` | Maps a persisted `DurableAccountIdentity` to the current in-memory `AccountId`. Returns an `AccountId` whose `type == StorageType::None` if the account is no longer detected; otherwise the resolved `AccountId`, suitable for passing straight to `select()`. |
 | `prune(sourceId)` | Apply the current `retentionPolicy` to `sourceId` immediately. Useful after a policy change. No-op while a backup is in progress. |
 | `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
@@ -382,28 +382,25 @@ Typical startup flow with a persisted user preference:
 ```cpp
 connect(manager, &CloudBackupManager::accountsDetected, this,
     [manager, savedIdentity /* DurableAccountIdentity */](auto) {
-        const QVariantMap id = manager->resolveAccount(savedIdentity);
-        if (!id.isEmpty()) {
-            AccountId resolved{ QtCloudBackup::StorageType(id["type"].toInt()),
-                                id["accountKey"].toString() };
-            manager->select(resolved);
-        } else {
+        const AccountId id = manager->resolveAccount(savedIdentity);
+        if (id.type != QtCloudBackup::StorageType::None)
+            manager->select(id);
+        else
             showPicker();  // saved account no longer detected
-        }
     });
 manager->detect();
 ```
 
-Or in QML:
+Or in QML — use `makeDurableAccountIdentity()` to build the persisted identity from primitives (a JS object literal won't auto-convert to a `Q_GADGET` argument at a QML→C++ call boundary):
 
 ```qml
 CloudBackupManager {
     id: backupManager
-    // savedIdentity is a DurableAccountIdentity-shaped object literal:
-    //   { type: ..., tenantId: "...", email: "..." }
     onAccountsDetected: (accounts) => {
-        const id = backupManager.resolveAccount(savedIdentity)
-        if (id.type !== undefined)
+        const id = backupManager.resolveAccount(
+            backupManager.makeDurableAccountIdentity(
+                savedType, savedTenantId, savedEmail))
+        if (id.type !== CloudBackup.StorageType.None)
             backupManager.select(id)
         else
             picker.open()

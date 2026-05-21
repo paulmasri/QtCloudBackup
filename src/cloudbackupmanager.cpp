@@ -273,15 +273,10 @@ void CloudBackupManager::select(const AccountId &id)
     m_backend->select(id);
 }
 
-QVariantMap CloudBackupManager::resolveAccount(const DurableAccountIdentity &identity) const
+AccountId CloudBackupManager::resolveAccount(const DurableAccountIdentity &identity) const
 {
     const auto id = m_backend->resolveAccount(identity);
-    if (!id)
-        return {};
-    return {
-        { QStringLiteral("type"), int(id->type) },
-        { QStringLiteral("accountKey"), id->accountKey },
-    };
+    return id ? *id : AccountId{};
 }
 
 void CloudBackupManager::prune(const QString &sourceId)
