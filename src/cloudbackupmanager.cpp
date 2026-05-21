@@ -273,15 +273,10 @@ void CloudBackupManager::select(const AccountId &id)
     m_backend->select(id);
 }
 
-QVariantMap CloudBackupManager::resolveAccount(const DurableAccountIdentity &identity) const
+AccountId CloudBackupManager::resolveAccount(const DurableAccountIdentity &identity) const
 {
     const auto id = m_backend->resolveAccount(identity);
-    if (!id)
-        return {};
-    return {
-        { QStringLiteral("type"), int(id->type) },
-        { QStringLiteral("accountKey"), id->accountKey },
-    };
+    return id ? *id : AccountId{};
 }
 
 void CloudBackupManager::prune(const QString &sourceId)
@@ -310,6 +305,12 @@ QtCloudBackup::RetentionPolicy CloudBackupManager::makeRetentionPolicy(
     int keepLast, int keepDaily, int keepWeekly, int keepMonthly, int keepYearly) const
 {
     return { keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly };
+}
+
+DurableAccountIdentity CloudBackupManager::makeDurableAccountIdentity(
+    QtCloudBackup::StorageType type, const QString &tenantId, const QString &email) const
+{
+    return { type, tenantId, email };
 }
 
 void CloudBackupManager::pruneBackups(const QString &sourceId)
