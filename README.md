@@ -165,6 +165,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
 | `makeRetentionPolicy(keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly)` | Factory for constructing a `RetentionPolicy` from QML — gadget value types can't be assembled via JS-object literals. See [QML usage example](#qml-usage-example). |
+| `makeDurableAccountIdentity(type, tenantId, email)` | Factory for constructing a `DurableAccountIdentity` from QML — same root cause as `makeRetentionPolicy`. Pair with `resolveAccount()` to rehydrate a persisted choice. |
 
 ### Signals
 

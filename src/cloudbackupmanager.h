@@ -61,6 +61,19 @@ public:
     Q_INVOKABLE QtCloudBackup::RetentionPolicy makeRetentionPolicy(
         int keepLast = 0, int keepDaily = 0, int keepWeekly = 0,
         int keepMonthly = 0, int keepYearly = 0) const;
+    // Factory for constructing a DurableAccountIdentity from QML. Same root
+    // cause as makeRetentionPolicy: gadget value types can't be `new`'d in
+    // JS, and a JS object literal won't auto-convert to a Q_GADGET argument
+    // at a QML→C++ call boundary. Consumers that need to construct the
+    // identity from primitives (e.g. rehydrating from persisted settings)
+    // build a full value here and pass it to resolveAccount:
+    //   manager.resolveAccount(
+    //       manager.makeDurableAccountIdentity(t, tenantId, email))
+    // C++ consumers can use aggregate initialisation directly.
+    Q_INVOKABLE DurableAccountIdentity makeDurableAccountIdentity(
+        QtCloudBackup::StorageType type = QtCloudBackup::StorageType::None,
+        const QString &tenantId = {},
+        const QString &email = {}) const;
 
 signals:
     void storageStatusChanged();

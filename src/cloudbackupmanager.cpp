@@ -312,6 +312,12 @@ QtCloudBackup::RetentionPolicy CloudBackupManager::makeRetentionPolicy(
     return { keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly };
 }
 
+DurableAccountIdentity CloudBackupManager::makeDurableAccountIdentity(
+    QtCloudBackup::StorageType type, const QString &tenantId, const QString &email) const
+{
+    return { type, tenantId, email };
+}
+
 void CloudBackupManager::pruneBackups(const QString &sourceId)
 {
     // Guard against re-entrancy from explicit prune() calls during an
