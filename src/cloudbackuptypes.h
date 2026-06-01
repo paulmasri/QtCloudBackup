@@ -135,6 +135,7 @@ Q_ENUM_NS(BackupError)
 // to recover the current `AccountId` from the live `detect()` result.
 class DurableAccountIdentity {
     Q_GADGET
+    QML_VALUE_TYPE(durableAccountIdentity)
     Q_PROPERTY(QtCloudBackup::StorageType type MEMBER type FINAL)
     Q_PROPERTY(QString tenantId MEMBER tenantId FINAL)
     Q_PROPERTY(QString email MEMBER email FINAL)
@@ -161,5 +162,3 @@ public:
         return !(a == b);
     }
 };
-
-Q_DECLARE_METATYPE(DurableAccountIdentity)

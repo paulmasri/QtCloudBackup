@@ -44,5 +44,3 @@ public:
 };
 
 } // namespace QtCloudBackup
-
-Q_DECLARE_METATYPE(QtCloudBackup::RetentionPolicy)

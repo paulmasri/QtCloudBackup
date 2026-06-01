@@ -16,6 +16,7 @@
 // `CloudBackupManager::resolveAccount()`.
 class AccountId {
     Q_GADGET
+    QML_VALUE_TYPE(accountId)
     Q_PROPERTY(QtCloudBackup::StorageType type MEMBER type)
     Q_PROPERTY(QString accountKey MEMBER accountKey)
 
@@ -29,8 +30,6 @@ public:
     }
     bool operator!=(const AccountId &other) const { return !(*this == other); }
 };
-
-Q_DECLARE_METATYPE(AccountId)
 
 // One row of stage-1 detection output. The library returns a `QList` of these
 // per `detect()` call — zero, one, or many entries depending on backend.
@@ -74,6 +73,7 @@ Q_DECLARE_METATYPE(AccountId)
 //               showing as an inline note or tooltip on disabled rows.
 class DetectedAccount {
     Q_GADGET
+    QML_VALUE_TYPE(detectedAccount)
     Q_PROPERTY(AccountId id MEMBER id)
     Q_PROPERTY(QString displayName MEMBER displayName)
     Q_PROPERTY(QString email MEMBER email)
@@ -90,10 +90,9 @@ public:
     QString statusDetail;
 };
 
-Q_DECLARE_METATYPE(DetectedAccount)
-
 class OrphanedBackupInfo {
     Q_GADGET
+    QML_VALUE_TYPE(orphanedBackupInfo)
     Q_PROPERTY(QString sourceId MEMBER sourceId)
     Q_PROPERTY(QDateTime timestamp MEMBER timestamp)
     Q_PROPERTY(QVariantMap metadata MEMBER metadata)
@@ -110,10 +109,9 @@ public:
     QString originPath;
 };
 
-Q_DECLARE_METATYPE(OrphanedBackupInfo)
-
 class BackupInfo {
     Q_GADGET
+    QML_VALUE_TYPE(backupInfo)
     Q_PROPERTY(QString sourceId MEMBER sourceId)
     Q_PROPERTY(QDateTime timestamp MEMBER timestamp)
     Q_PROPERTY(QVariantMap metadata MEMBER metadata)
@@ -150,4 +148,3 @@ public:
     QtCloudBackup::DownloadState metaDownloadState = QtCloudBackup::DownloadState::Local;
 };
 
-Q_DECLARE_METATYPE(BackupInfo)
