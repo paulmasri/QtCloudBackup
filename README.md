@@ -275,17 +275,17 @@ Item {
         }
         onRestoreUpdated: (filename, status, data, metadata, error, message) => {
             switch (status) {
-            case CloudBackup.RestoreDownloading:
+            case QtCloudBackup.RestoreDownloading:
                 console.log("Downloading from cloud...")
                 break
-            case CloudBackup.RestoreInProgress:
+            case QtCloudBackup.RestoreInProgress:
                 console.log("Reading backup...")
                 break
-            case CloudBackup.RestoreSucceeded:
+            case QtCloudBackup.RestoreSucceeded:
                 console.log("Restored", data.byteLength, "bytes")
                 // Use data and metadata here
                 break
-            case CloudBackup.RestoreFailed:
+            case QtCloudBackup.RestoreFailed:
                 console.log("Restore failed:", error, message)
                 break
             }
@@ -302,7 +302,7 @@ Item {
     // via resolveAccount() or show a picker).
     onAccountsDetected: (accounts) => {
         for (let i = 0; i < accounts.length; i++) {
-            if (accounts[i].status === CloudBackup.StorageStatus.Ready) {
+            if (accounts[i].status === QtCloudBackup.StorageStatus.Ready) {
                 backupManager.select(accounts[i].id)
                 return
             }
@@ -401,7 +401,7 @@ CloudBackupManager {
         const id = backupManager.resolveAccount(
             backupManager.makeDurableAccountIdentity(
                 savedType, savedTenantId, savedEmail))
-        if (id.type !== CloudBackup.StorageType.None)
+        if (id.type !== QtCloudBackup.StorageType.None)
             backupManager.select(id)
         else
             picker.open()
@@ -653,9 +653,9 @@ CloudBackupManager {
             migrationDialog.open()  // Let the user decide
     }
     onMigrationUpdated: (status, migratedCount, totalCount, error, message) => {
-        if (status === CloudBackup.MigrationSucceeded)
+        if (status === QtCloudBackup.MigrationSucceeded)
             console.log("Migrated", migratedCount, "backups")
-        else if (status === CloudBackup.MigrationFailed)
+        else if (status === QtCloudBackup.MigrationFailed)
             console.log("Migration failed:", error, message)
     }
 }

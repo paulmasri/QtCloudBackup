@@ -7,7 +7,7 @@
 
 namespace QtCloudBackup {
 Q_NAMESPACE
-QML_NAMED_ELEMENT(CloudBackup)
+QML_NAMED_ELEMENT(QtCloudBackup)
 
 // StorageStatus values map to distinct user remediation flows rather than to
 // distinct technical causes — if two states would lead the user to take the
