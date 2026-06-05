@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLoggingCategory>
 #include <QMetaObject>
 #include <QPointer>
 #include <QRegularExpression>
@@ -20,6 +21,8 @@
 #ifndef QTCLOUDBACKUP_WINDOWS_BACKUP_PATH
 #define QTCLOUDBACKUP_WINDOWS_BACKUP_PATH ""
 #endif
+
+Q_LOGGING_CATEGORY(windowsLog, "qtcloudbackup.windows")
 
 static constexpr qint64 MaxMetaFileSize = 1024 * 1024; // 1 MB
 
@@ -104,12 +107,29 @@ void WindowsOneDriveBackend::detect()
                 const QString folder = acc.value(QStringLiteral("UserFolder")).toString();
                 const QString tenantId = acc.value(QStringLiteral("ConfiguredTenantId")).toString();
 
-                // "All fields non-empty" is the configured-account predicate.
                 // OneDrive sign-out has been observed to leave partial
-                // registry residue (e.g. UserFolder populated after UserEmail
-                // is gone); treat any missing field as not-active.
-                const bool fieldsComplete = !email.isEmpty() && !folder.isEmpty()
-                    && (isPersonal || !tenantId.isEmpty());
+                // registry residue (e.g. UserFolder populated after
+                // UserEmail is gone). Skip such slots entirely — they have
+                // no useful label, no actionable remediation from a
+                // consumer-app context, and would be filtered by most
+                // consumer UIs anyway. Log under qtcloudbackup.windows so
+                // a developer wondering why a half-configured account
+                // isn't appearing has a breadcrumb.
+                QStringList missingFields;
+                if (email.isEmpty())
+                    missingFields << QStringLiteral("UserEmail");
+                if (folder.isEmpty())
+                    missingFields << QStringLiteral("UserFolder");
+                if (isBusiness && tenantId.isEmpty())
+                    missingFields << QStringLiteral("ConfiguredTenantId");
+                if (!missingFields.isEmpty()) {
+                    qCInfo(windowsLog).noquote()
+                        << QStringLiteral("Skipping partial OneDrive account residue at "
+                                          "HKCU\\Software\\Microsoft\\OneDrive\\Accounts\\%1: "
+                                          "missing %2")
+                               .arg(key, missingFields.join(QStringLiteral(", ")));
+                    continue;
+                }
 
                 DetectedAccount a;
                 a.id.type = isPersonal ? QtCloudBackup::StorageType::OneDrivePersonal
@@ -122,17 +142,12 @@ void WindowsOneDriveBackend::detect()
                 // Business. The consumer renders Business verbatim and
                 // composes its own label for Personal (Windows's bare
                 // "OneDrive" isn't enough to distinguish it in a multi-
-                // account picker). Falls back to the account key for
-                // partial-registry residue.
-                a.displayName = fieldsComplete ? QFileInfo(folder).fileName() : key;
+                // account picker).
+                a.displayName = QFileInfo(folder).fileName();
                 a.email = email;
                 a.tenantId = isPersonal ? QString() : tenantId;
 
-                if (!fieldsComplete) {
-                    a.status = QtCloudBackup::StorageStatus::Unavailable;
-                    a.statusDetail = WindowsOneDriveBackend::tr(
-                        "OneDrive account partially configured");
-                } else if (isPersonal && personalSyncDisabled) {
+                if (isPersonal && personalSyncDisabled) {
                     a.status = QtCloudBackup::StorageStatus::Disabled;
                     a.statusDetail = WindowsOneDriveBackend::tr(
                         "Personal OneDrive sync is disabled by your organisation's policy");
@@ -148,9 +163,7 @@ void WindowsOneDriveBackend::detect()
                 } else if (!QFileInfo(folder).isWritable()) {
                     // Metadata check, NOT a write. Detection is side-effect-
                     // free; the actual writability gate is the mkpath in
-                    // select(). Missing folder also fails isWritable(), which
-                    // is the behaviour we want — signed-out residue surfaces
-                    // as Unavailable rather than Ready.
+                    // select().
                     a.status = QtCloudBackup::StorageStatus::Unavailable;
                     a.statusDetail = WindowsOneDriveBackend::tr(
                         "OneDrive folder is missing or not writable");
@@ -161,8 +174,7 @@ void WindowsOneDriveBackend::detect()
                         : WindowsOneDriveBackend::tr("OneDrive for Business is available");
                 }
 
-                if (!folder.isEmpty())
-                    userFolders.insert(key, folder);
+                userFolders.insert(key, folder);
                 accounts.append(a);
             }
         }
