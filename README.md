@@ -117,7 +117,7 @@ macOS development builds must be code-signed to access iCloud. Use the Xcode CMa
 
 ## Windows setup
 
-No special setup required. The library enumerates OneDrive accounts from the registry under `HKCU\Software\Microsoft\OneDrive\Accounts\*`, recognising `Personal` and `Business1`..`Business9` subkeys (gap-tolerant — accounts removed and re-added can leave gaps). For each subkey, it reads `UserEmail`, `UserFolder`, and (for Business) `ConfiguredTenantId`; all three must be present for the account to be considered configured.
+No special setup required. The library enumerates OneDrive accounts from the registry under `HKCU\Software\Microsoft\OneDrive\Accounts\*`, recognising `Personal` and `Business1`..`Business9` subkeys (gap-tolerant — accounts removed and re-added can leave gaps). For each subkey, it reads `UserEmail`, `UserFolder`, and (for Business) `ConfiguredTenantId`; **all three must be present, otherwise the slot is skipped at detection.** Two cases produce this state: `SilentAccountConfig` (IT- or OEM-driven silent provisioning) that started but never completed leaves the slot present with empty fields; and signing out of an account can leave partial residue under the same key. Either way, the slot has no useful label and no actionable remediation from a consumer-app context. Skipped slots are logged at `qCInfo` under the `qtcloudbackup.windows` category, naming the registry key and which fields were missing, so a developer wondering why a half-configured account isn't appearing has a breadcrumb.
 
 Set `QTCLOUDBACKUP_WINDOWS_BACKUP_PATH` to a relative path within OneDrive (e.g. `"YourApp/Backups"`) to avoid polluting the root. **Do not use `"Personal Vault"`** — that name collides with OneDrive's locked virtual folder and writes will fail when the vault is locked. The library's CMake enforces this at configure time with a `FATAL_ERROR`. Choose a unique, app-namespaced subfolder name.
 
@@ -441,7 +441,7 @@ UI implication: `Disabled` rows should explain the situation without inviting a 
 | Condition | Status |
 |---|---|
 | Device-level `DisableFileSyncNGSC = 1` | Backend-level `Disabled`; no accounts enumerated |
-| Account fields incomplete (signed-out residue, partial config) | `Unavailable` (per account) |
+| Account fields incomplete (signed-out residue, partial config) | Suppressed — skipped at detection, not surfaced |
 | Personal account with `DisablePersonalSync = 1` (HKCU or HKLM) | `Disabled` (per account) |
 | Business account blocked by `AllowTenantList` / `BlockTenantList` | `Disabled` (per account) |
 | `UserFolder` missing or not writable | `Unavailable` (per account) |
