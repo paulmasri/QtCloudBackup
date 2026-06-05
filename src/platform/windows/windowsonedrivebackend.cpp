@@ -107,14 +107,16 @@ void WindowsOneDriveBackend::detect()
                 const QString folder = acc.value(QStringLiteral("UserFolder")).toString();
                 const QString tenantId = acc.value(QStringLiteral("ConfiguredTenantId")).toString();
 
-                // OneDrive sign-out has been observed to leave partial
-                // registry residue (e.g. UserFolder populated after
-                // UserEmail is gone). Skip such slots entirely — they have
-                // no useful label, no actionable remediation from a
-                // consumer-app context, and would be filtered by most
-                // consumer UIs anyway. Log under qtcloudbackup.windows so
-                // a developer wondering why a half-configured account
-                // isn't appearing has a breadcrumb.
+                // A Business* / Personal slot can exist with empty fields
+                // in two documented cases: SilentAccountConfig (IT- or
+                // OEM-driven silent provisioning) that started but never
+                // completed, and signing out leaving partial residue.
+                // Skip such slots entirely — they have no useful label,
+                // no actionable remediation from a consumer-app context,
+                // and would be filtered by most consumer UIs anyway. Log
+                // under qtcloudbackup.windows so a developer wondering
+                // why a half-configured account isn't appearing has a
+                // breadcrumb.
                 QStringList missingFields;
                 if (email.isEmpty())
                     missingFields << QStringLiteral("UserEmail");
