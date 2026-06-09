@@ -83,6 +83,22 @@ if(QTCLOUDBACKUP_BUILD_TESTS)
     target_link_libraries(test_retention PRIVATE QtCloudBackup Qt6::Core)
 endif()
 
+# Export the complete, host-independent list of translatable source files so a
+# consuming app can regenerate .ts files on any host and capture every
+# platform backend's tr() strings. Without this, qt_add_translations() only
+# scans the host's compiled SOURCES and drops the other platforms' contexts
+# (e.g. running lupdate on Windows would lose AppleICloudBackend strings).
+# Absolute paths so the consumer can pass the list straight to
+# qt_add_translations(... SOURCES ...) regardless of their own source layout.
+# See README "Translation extraction (i18n)" for the consumer recipe.
+set_target_properties(QtCloudBackup PROPERTIES
+    QTCLOUDBACKUP_TRANSLATABLE_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/cloudbackupmanager.cpp;\
+${CMAKE_CURRENT_SOURCE_DIR}/src/platform/fallback/localbackend.cpp;\
+${CMAKE_CURRENT_SOURCE_DIR}/src/platform/apple/appleicloudbackend.mm;\
+${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/windowsonedrivebackend.cpp"
+)
+
 qt_add_qml_module(QtCloudBackup
     URI QtCloudBackup
     VERSION 1.0

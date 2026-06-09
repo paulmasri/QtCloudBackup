@@ -78,6 +78,20 @@ import QtCloudBackup
 
 If using `engine.loadFromModule()` and it fails with the Xcode generator, use `engine.load(QUrl("qrc:/..."))` instead.
 
+### Translation extraction (i18n)
+
+Only the host's backend is compiled (`appleicloudbackend.mm` on Apple, `windowsonedrivebackend.cpp` on Windows, plus the always-compiled `localbackend.cpp` and `cloudbackupmanager.cpp`). Each backend carries its own user-facing `tr()` strings, so `qt_add_translations(<app>)` — which scans linked targets' `SOURCES` — would only see the host platform's strings, and regenerating `.ts` files on a different OS would drop the other platform's context (e.g. `lupdate` on Windows would remove the `AppleICloudBackend` context).
+
+To capture every backend's strings on any host, the library exports the complete translatable source list as a target property. Combine it with `QT_EXCLUDE_FROM_TRANSLATION` so the library's auto-collected SOURCES are not double-counted:
+
+```cmake
+set_property(TARGET QtCloudBackup PROPERTY QT_EXCLUDE_FROM_TRANSLATION ON)
+get_target_property(qcb_i18n QtCloudBackup QTCLOUDBACKUP_TRANSLATABLE_SOURCES)
+qt_add_translations(YourApp SOURCES ${qcb_i18n})
+```
+
+This uses only documented Qt 6 i18n API. `lupdate` parses the non-host backend (e.g. the Objective-C++ `.mm` on Windows) without compiling it, so missing platform headers do not block `tr()` extraction.
+
 ## Apple setup
 
 ### Entitlements
