@@ -30,8 +30,8 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
 
     connect(m_backend.get(), &CloudBackupBackend::writeCompleted, this,
             [this](const QString &filename, int error, const QString &message) {
-                m_backupInProgress = false;
-                emit backupInProgressChanged();
+                m_backupIoBusy = false;
+                emit backupIoBusyChanged();
                 if (error == int(QtCloudBackup::BackupError::NoError)) {
                     emit backupSucceeded(filename, m_currentBackupTimestamp);
                     pruneBackups(m_currentBackupSourceId);
@@ -47,12 +47,10 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
             [this](const QString &filename, const QByteArray &data, const QJsonObject &meta,
                    int error, const QString &message) {
                 if (error == int(QtCloudBackup::BackupError::NoError)) {
-                    m_pendingRestoreFilename.clear();
-                    m_backupInProgress = false;
-                    emit backupInProgressChanged();
-                    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreSucceeded,
-                                        data, meta.toVariantMap(),
-                                        int(QtCloudBackup::BackupError::NoError), QString());
+                    m_pendingReadFilename.clear();
+                    m_backupIoBusy = false;
+                    emit backupIoBusyChanged();
+                    emit backupReadCompleted(filename, data, meta.toVariantMap());
                 } else {
                     handleReadFailed(filename, error, message);
                 }
@@ -72,18 +70,15 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     connect(m_backend.get(), &CloudBackupBackend::downloadCompleted, this,
             [this](const QString &filename, int error, const QString &message) {
                 bool success = (error == int(QtCloudBackup::BackupError::NoError));
-                if (!m_pendingRestoreFilename.isEmpty() && filename == m_pendingRestoreFilename) {
+                if (!m_pendingReadFilename.isEmpty() && filename == m_pendingReadFilename) {
                     if (success) {
-                        // Auto-retry the restore
-                        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreInProgress,
-                                            {}, {}, int(QtCloudBackup::BackupError::NoError), QString());
+                        // Auto-retry the read now that the file is local
                         m_backend->readBackup(filename);
                     } else {
-                        m_pendingRestoreFilename.clear();
-                        m_backupInProgress = false;
-                        emit backupInProgressChanged();
-                        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed,
-                                            {}, {}, error, message);
+                        m_pendingReadFilename.clear();
+                        m_backupIoBusy = false;
+                        emit backupIoBusyChanged();
+                        emit backupReadFailed(filename, error, message);
                     }
                 } else {
                     auto status = success ? QtCloudBackup::DownloadStatus::DownloadSucceeded
@@ -147,9 +142,9 @@ QtCloudBackup::StorageType CloudBackupManager::storageType() const
     return m_backend->storageType();
 }
 
-bool CloudBackupManager::backupInProgress() const
+bool CloudBackupManager::backupIoBusy() const
 {
-    return m_backupInProgress;
+    return m_backupIoBusy;
 }
 
 QtCloudBackup::RetentionPolicy CloudBackupManager::retentionPolicy() const
@@ -173,7 +168,7 @@ bool CloudBackupManager::hasOrphanedBackups() const
 void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray &data,
                                        const QVariantMap &metadata)
 {
-    if (m_backupInProgress)
+    if (m_backupIoBusy)
         return;
 
     // Sanitize sourceId
@@ -193,8 +188,8 @@ void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray 
         sanitized.truncate(64);
     }
 
-    m_backupInProgress = true;
-    emit backupInProgressChanged();
+    m_backupIoBusy = true;
+    emit backupIoBusyChanged();
 
     m_currentBackupSourceId = sanitized;
     m_currentBackupTimestamp = QDateTime::currentDateTimeUtc();
@@ -234,22 +229,20 @@ void CloudBackupManager::requestDownload(const QString &filename)
     m_backend->triggerDownload(filename);
 }
 
-void CloudBackupManager::restoreBackup(const QString &filename)
+void CloudBackupManager::readBackup(const QString &filename)
 {
     if (!isValidBackupFilename(filename)) {
-        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
-                            int(QtCloudBackup::BackupError::InvalidArgument),
-                            tr("Invalid backup filename"));
+        emit backupReadFailed(filename, int(QtCloudBackup::BackupError::InvalidArgument),
+                              tr("Invalid backup filename"));
         return;
     }
-    if (m_backupInProgress)
+    if (m_backupIoBusy)
         return;
 
-    m_pendingRestoreFilename.clear();
-    m_backupInProgress = true;
-    emit backupInProgressChanged();
-    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreInProgress, {}, {},
-                        int(QtCloudBackup::BackupError::NoError), QString());
+    m_pendingReadFilename.clear();
+    m_backupIoBusy = true;
+    emit backupIoBusyChanged();
+    emit backupReadStarted(filename);
     m_backend->readBackup(filename);
 }
 
@@ -323,9 +316,9 @@ void CloudBackupManager::pruneBackups(const QString &sourceId)
 {
     // Guard against re-entrancy from explicit prune() calls during an
     // in-flight backup write. The post-write auto-trigger sets
-    // m_backupInProgress=false before calling pruneBackups, so it
+    // m_backupIoBusy=false before calling pruneBackups, so it
     // passes this check.
-    if (m_backupInProgress) {
+    if (m_backupIoBusy) {
         qCDebug(managerLog,
                 "prune skipped while a backup is in progress (sourceId=%s)",
                 qPrintable(sourceId));
@@ -357,20 +350,20 @@ void CloudBackupManager::handleReadFailed(const QString &filename, int error,
                                            const QString &message)
 {
     // If the file is cloud-only and we haven't already tried downloading,
-    // auto-trigger the download and retry on completion.
-    if (m_pendingRestoreFilename.isEmpty()
+    // auto-trigger the download and retry on completion. The read is still
+    // in flight from the consumer's perspective — backupReadStarted was
+    // emitted once at readBackup() entry; downloadProgressChanged covers
+    // the visible progress until the retry produces a terminal signal.
+    if (m_pendingReadFilename.isEmpty()
         && error == int(QtCloudBackup::BackupError::FileNotLocal)) {
-        m_pendingRestoreFilename = filename;
-        emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreDownloading, {}, {},
-                            int(QtCloudBackup::BackupError::NoError), QString());
+        m_pendingReadFilename = filename;
         m_backend->triggerDownload(filename);
         return;
     }
 
     // Either the retry failed or it's a different error — give up
-    m_pendingRestoreFilename.clear();
-    m_backupInProgress = false;
-    emit backupInProgressChanged();
-    emit restoreUpdated(filename, QtCloudBackup::RestoreStatus::RestoreFailed, {}, {},
-                        error, message);
+    m_pendingReadFilename.clear();
+    m_backupIoBusy = false;
+    emit backupIoBusyChanged();
+    emit backupReadFailed(filename, error, message);
 }

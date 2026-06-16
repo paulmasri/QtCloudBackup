@@ -11,7 +11,7 @@ QtCloudBackup provides a single C++ class (`CloudBackupManager`) registered as a
 - Writes opaque `QByteArray` payloads as timestamped backup files
 - Lists available backups with metadata and download state
 - Triggers hydration (download) of cloud-only files
-- Restores a backup by returning its `QByteArray` payload, auto-downloading if cloud-only
+- Reads a backup back into its `QByteArray` payload and metadata, auto-downloading if cloud-only
 - Deletes backups
 - Prunes old backups per source ID
 - Emits status signals for every operation stage
@@ -159,7 +159,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `storageStatus` | `StorageStatus` | Current storage availability |
 | `statusDetail` | `QString` | Human-readable status detail |
 | `storageType` | `StorageType` | Which backend is active |
-| `backupInProgress` | `bool` | Whether a create/restore operation is running |
+| `backupIoBusy` | `bool` | Whether the library is mid-IO with the storage backend (create or read path) |
 | `retentionPolicy` | `RetentionPolicy` | Configurable union-of-keeps retention (default: `{ keepLast = 3 }`). See [How pruning works](#how-pruning-works). |
 | `hasOrphanedBackups` | `bool` | Whether orphaned backups were found (see [Orphaned backup migration](#orphaned-backup-migration)) |
 
@@ -169,7 +169,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 |--------|-------------|
 | `createBackup(sourceId, data, metadata)` | Write a backup with optional metadata map |
 | `listBackups()` | Scan for all backups and emit `backupsListed` |
-| `restoreBackup(filename)` | Read a backup; auto-downloads if cloud-only |
+| `readBackup(filename)` | Fetch a backup's bytes and metadata; auto-downloads if cloud-only |
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
 | `deleteBackup(filename)` | Delete a backup and its metadata sidecar |
 | `detect()` | Stage 1: enumerate candidate accounts. No filesystem side effects. Result delivered via `accountsDetected`. See [Storage lifecycle](#storage-lifecycle). |
@@ -191,9 +191,11 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `backupSucceeded(filename, timestamp)` | Backup created |
 | `backupFailed(error, message)` | Backup creation failed (see BackupError enum) |
 | `backupsListed(backups)` | Scan complete; `backups` is a `QList<BackupInfo>` |
-| `restoreUpdated(filename, status, data, metadata, error, message)` | Restore status update (see RestoreStatus, BackupError enums) |
+| `backupReadStarted(filename)` | `readBackup()` accepted; bytes have not yet arrived |
+| `backupReadCompleted(filename, data, metadata)` | Read succeeded; `data` is the backup payload, `metadata` is the recorded metadata map |
+| `backupReadFailed(filename, error, message)` | Read failed (see BackupError enum) |
 | `downloadUpdated(filename, status, error, message)` | Download status update (see DownloadStatus, BackupError enums) |
-| `downloadProgressChanged(filename, bytesReceived, bytesTotal)` | Download progress (`bytesTotal == -1` means indeterminate) |
+| `downloadProgressChanged(filename, bytesReceived, bytesTotal)` | Download progress (`bytesTotal == -1` means indeterminate). Also fires during `readBackup()`'s auto-download retry. |
 | `deleteSucceeded(filename)` / `deleteFailed(filename, error, message)` | Delete result (see BackupError enum) |
 | `remoteBackupDetected(sourceId)` | A new backup appeared from another device |
 | `orphanedBackupsDetected(orphans)` | Orphan scan complete; `orphans` is a `QVariantList` of `OrphanedBackupInfo` |
@@ -206,8 +208,6 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 **StorageType**: `None`, `ICloud`, `OneDrivePersonal`, `OneDriveCommercial`, `LocalDirectory`
 
 **DownloadState** (on BackupInfo, used by both `downloadState` and `metaDownloadState`): `Local`, `CloudOnly`, `Downloading`, `Error`, `Missing`
-
-**RestoreStatus**: `RestoreDownloading`, `RestoreInProgress`, `RestoreSucceeded`, `RestoreFailed`
 
 **DownloadStatus**: `DownloadInProgress`, `DownloadSucceeded`, `DownloadFailed`
 
@@ -287,22 +287,19 @@ Item {
         onBackupSucceeded: (filename, timestamp) => {
             console.log("Backup created:", filename)
         }
-        onRestoreUpdated: (filename, status, data, metadata, error, message) => {
-            switch (status) {
-            case QtCloudBackup.RestoreDownloading:
-                console.log("Downloading from cloud...")
-                break
-            case QtCloudBackup.RestoreInProgress:
-                console.log("Reading backup...")
-                break
-            case QtCloudBackup.RestoreSucceeded:
-                console.log("Restored", data.byteLength, "bytes")
-                // Use data and metadata here
-                break
-            case QtCloudBackup.RestoreFailed:
-                console.log("Restore failed:", error, message)
-                break
-            }
+        onBackupReadStarted: (filename) => {
+            console.log("Reading backup...")
+        }
+        onDownloadProgressChanged: (filename, bytesReceived, bytesTotal) => {
+            // Also fires during the auto-download retry that readBackup()
+            // triggers when the file is cloud-only.
+        }
+        onBackupReadCompleted: (filename, data, metadata) => {
+            console.log("Read", data.byteLength, "bytes")
+            // Use data and metadata here
+        }
+        onBackupReadFailed: (filename, error, message) => {
+            console.log("Read failed:", error, message)
         }
     }
 
@@ -323,11 +320,11 @@ Item {
         }
     }
 
-    // List and restore
+    // List and read
     Component.onCompleted: {
         backupManager.backupsListed.connect(function(backups) {
             if (backups.length > 0)
-                backupManager.restoreBackup(backups[0].filename)
+                backupManager.readBackup(backups[0].filename)
         })
         backupManager.detect()
     }
@@ -348,14 +345,14 @@ connect(manager, &CloudBackupManager::backupSucceeded,
     qDebug() << "Backup created:" << filename << "at" << timestamp;
 });
 
-connect(manager, &CloudBackupManager::restoreUpdated,
-        this, [](const QString &filename, QtCloudBackup::RestoreStatus status,
-                 const QByteArray &data, const QVariantMap &metadata,
-                 int error, const QString &message) {
-    if (status == QtCloudBackup::RestoreStatus::RestoreSucceeded)
-        qDebug() << "Restored" << data.size() << "bytes";
-    else if (status == QtCloudBackup::RestoreStatus::RestoreFailed)
-        qDebug() << "Restore failed:" << error << message;
+connect(manager, &CloudBackupManager::backupReadCompleted,
+        this, [](const QString &filename, const QByteArray &data,
+                 const QVariantMap &metadata) {
+    qDebug() << "Read" << data.size() << "bytes from" << filename;
+});
+connect(manager, &CloudBackupManager::backupReadFailed,
+        this, [](const QString &filename, int error, const QString &message) {
+    qDebug() << "Read failed:" << error << message;
 });
 
 // Lifecycle: detect, then select. A real consumer would resolve a persisted
@@ -376,11 +373,11 @@ QByteArray payload = /* your serialised data */;
 QVariantMap meta = { { "device", "iPhone" } };
 manager->createBackup("my-source-id", payload, meta);
 
-// List and restore the latest
+// List and read the latest
 connect(manager, &CloudBackupManager::backupsListed,
         this, [manager](const QList<BackupInfo> &backups) {
     if (!backups.isEmpty())
-        manager->restoreBackup(backups.first().filename);
+        manager->readBackup(backups.first().filename);
 });
 manager->listBackups();
 ```
