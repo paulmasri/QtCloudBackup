@@ -43,6 +43,9 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
             &CloudBackupManager::backupsListed);
 
+    connect(m_backend.get(), &CloudBackupBackend::digestScanCompleted, this,
+            &CloudBackupManager::backupDigestsListed);
+
     connect(m_backend.get(), &CloudBackupBackend::readCompleted, this,
             [this](const QString &filename, const QByteArray &data, const QJsonObject &meta,
                    int error, const QString &message) {
@@ -214,6 +217,11 @@ void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray 
 void CloudBackupManager::listBackups()
 {
     m_backend->scanBackups();
+}
+
+void CloudBackupManager::listBackupDigests()
+{
+    m_backend->scanBackupDigests();
 }
 
 void CloudBackupManager::requestDownload(const QString &filename)

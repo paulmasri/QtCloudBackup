@@ -8,7 +8,6 @@
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QPointer>
-#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QtConcurrent>
@@ -288,9 +287,6 @@ void LocalBackend::scanBackups()
         QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
                                           QDir::Files, QDir::Name);
 
-        static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
-
         QList<BackupInfo> backups;
         for (const QString &entry : entries) {
             BackupInfo info;
@@ -322,15 +318,8 @@ void LocalBackend::scanBackups()
 
             // Fallback: parse filename (always needed when .meta is missing,
             // and a safety net when .meta is malformed)
-            if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
-                auto match = re.match(entry);
-                if (match.hasMatch()) {
-                    info.sourceId = match.captured(1);
-                    info.timestamp = QDateTime::fromString(match.captured(2),
-                                                            QStringLiteral("yyyyMMdd_HHmmss_zzz"));
-                    info.timestamp.setTimeZone(QTimeZone::utc());
-                }
-            }
+            if (info.sourceId.isEmpty() || !info.timestamp.isValid())
+                parseBackupFilename(entry, info.sourceId, info.timestamp);
 
             backups.append(info);
         }
@@ -338,6 +327,34 @@ void LocalBackend::scanBackups()
         QMetaObject::invokeMethod(qApp, [self, backups] {
             if (!self) return;
             emit self->scanCompleted(backups);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void LocalBackend::scanBackupDigests()
+{
+    QString dir = backupDir();
+    QPointer<LocalBackend> self(this);
+    (void)QtConcurrent::run([self, dir] {
+        QDir d(dir);
+        const QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
+                                                QDir::Files, QDir::Name);
+
+        // Filenames only — no .meta open, no hydration. Entries whose name
+        // doesn't parse are skipped: a digest exists to answer questions that
+        // are meaningless without a sourceId and timestamp.
+        QList<BackupDigest> digests;
+        for (const QString &entry : entries) {
+            BackupDigest digest;
+            digest.filename = entry;
+            if (!parseBackupFilename(entry, digest.sourceId, digest.timestamp))
+                continue;
+            digests.append(digest);
+        }
+
+        QMetaObject::invokeMethod(qApp, [self, digests] {
+            if (!self) return;
+            emit self->digestScanCompleted(digests);
         }, Qt::QueuedConnection);
     });
 }

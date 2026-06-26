@@ -62,6 +62,11 @@ public:
     virtual void readBackup(const QString &filename) = 0;
     virtual void deleteBackup(const QString &filename) = 0;
     virtual void scanBackups() = 0;
+    // Lightweight sibling of scanBackups(): enumerate the backup directory and
+    // parse filenames only. Never opens a .meta sidecar and never triggers
+    // hydration of a cloud placeholder. Async; result delivered via
+    // digestScanCompleted.
+    virtual void scanBackupDigests() = 0;
     virtual void triggerDownload(const QString &filename) = 0;
     virtual void scanOrphanedBackups() = 0;
     virtual void migrateOrphanedBackups(const QList<OrphanedBackupInfo> &orphans) = 0;
@@ -81,6 +86,7 @@ signals:
                        int error, const QString &message);
     void deleteCompleted(const QString &filename, int error, const QString &message);
     void scanCompleted(const QList<BackupInfo> &backups);
+    void digestScanCompleted(const QList<BackupDigest> &digests);
     void downloadProgress(const QString &filename, qint64 received, qint64 total);
     void downloadCompleted(const QString &filename, int error, const QString &message);
     void remoteChangeDetected(const QString &sourceId);

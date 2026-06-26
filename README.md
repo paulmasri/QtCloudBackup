@@ -168,7 +168,8 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | Method | Description |
 |--------|-------------|
 | `createBackup(sourceId, data, metadata)` | Write a backup with optional metadata map |
-| `listBackups()` | Scan for all backups and emit `backupsListed` |
+| `listBackups()` | Scan for all backups (full metadata) and emit `backupsListed` |
+| `listBackupDigests()` | Lightweight scan — emit `backupDigestsListed` with `sourceId`/`timestamp`/`filename` derived from filenames alone. No `.meta` sidecar reads, no cloud-placeholder hydration. See [Lightweight digest listing](#lightweight-digest-listing). |
 | `readBackup(filename)` | Fetch a backup's bytes and metadata; auto-downloads if cloud-only |
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
 | `deleteBackup(filename)` | Delete a backup and its metadata sidecar |
@@ -191,6 +192,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `backupSucceeded(filename, timestamp)` | Backup created |
 | `backupFailed(error, message)` | Backup creation failed (see BackupError enum) |
 | `backupsListed(backups)` | Scan complete; `backups` is a `QList<BackupInfo>` |
+| `backupDigestsListed(digests)` | Lightweight scan complete; `digests` is a `QList<BackupDigest>` (filename-derived `sourceId`/`timestamp`/`filename` only). |
 | `backupReadStarted(filename)` | `readBackup()` accepted; bytes have not yet arrived |
 | `backupReadCompleted(filename, data, metadata)` | Read succeeded; `data` is the backup payload, `metadata` is the recorded metadata map |
 | `backupReadFailed(filename, error, message)` | Read failed (see BackupError enum) |
@@ -235,6 +237,14 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `metadata` | Application-supplied map from `createBackup` |
 | `downloadState` | State of the `.bak` payload — `Local` / `CloudOnly` / `Downloading` / `Error` / `Missing`. |
 | `metaDownloadState` | State of the `.meta` sidecar — same enum as `downloadState`. The metadata map is trustworthy iff `metaDownloadState == Local`; any other value means `metadata` is empty and only `sourceId` / `timestamp` (from the filename) are populated. Values: `Local` (sidecar on disk, parsed); `Missing` (sidecar absent — mid-write, orphan, or interrupted delete); `CloudOnly` (cloud placeholder, scanner skipped open — Apple only, see caveat); `Downloading` (partially hydrated — Apple only); `Error` (open or JSON parse failed). Retention treats anything `!= Local` as **present but unconfirmed** — never pruned, but counted toward bucket occupancy and the min-keep safety net. **Platform asymmetry**: Apple distinguishes all five (and kicks off background hydration on `CloudOnly`); Windows never produces `CloudOnly` / `Downloading` because the scanner always opens (no consumer-callable hydration API on Windows — see the cloud-sync caveat); Local backend only produces `Local`/`Missing`/`Error`. |
+
+**BackupDigest** — entries in `backupDigestsListed`. A strict subset of `BackupInfo`:
+
+| Field | Description |
+|-------|-------------|
+| `sourceId`, `timestamp`, `filename` | Identifying fields, all parsed from the filename (UTC `timestamp`, same millisecond precision as the sidecar). |
+
+No `metadata` and no download-state fields — by design, so a digest can never be mistaken for a fully-populated record. See [Lightweight digest listing](#lightweight-digest-listing).
 
 **DetectedAccount** — entries in `accountsDetected`:
 
@@ -381,6 +391,30 @@ connect(manager, &CloudBackupManager::backupsListed,
 });
 manager->listBackups();
 ```
+
+## Lightweight digest listing
+
+`listBackups()` gathers *complete* metadata: it opens every `.meta` sidecar to populate the application metadata map and resolve each file's download state. That is the right behaviour when about to present a full restore browser, but it is overhead for consumers that only need to answer cheap, ongoing questions:
+
+- *Does any backup exist at all?*
+- *What is the timestamp of each backup* (e.g. to decide whether a backup older / newer than some reference time exists, to surface or suppress a restore affordance)?
+- *Which `sourceId`s have backups?*
+
+Everything those questions need is already encoded in the backup filename, so `listBackupDigests()` answers them by enumerating the directory and parsing names only — **no `.meta` sidecar is ever opened, and no cloud placeholder is ever hydrated**. The result arrives via `backupDigestsListed(QList<BackupDigest>)`, each entry carrying just `sourceId`, a UTC `timestamp` (same millisecond precision as the sidecar), and `filename`.
+
+```cpp
+connect(manager, &CloudBackupManager::backupDigestsListed, this,
+        [](const QList<BackupDigest> &digests) {
+    // e.g. is there a backup newer than our last local save?
+    bool hasNewer = std::any_of(digests.begin(), digests.end(),
+        [&](const BackupDigest &d) { return d.timestamp > lastLocalSave; });
+});
+manager->listBackupDigests();
+```
+
+This matters most on the Windows OneDrive backend: opening a cloud-only `.meta` placeholder traps into the Cloud Files filter driver and forces an on-demand download (measured at roughly 0.3 s per unhydrated file on the first scan after a fresh sync). The digest path never opens those files, so a consumer can poll or re-evaluate backup presence cheaply without triggering hydration.
+
+The digest path is **additive and read-only** — it does not replace or alter `listBackups()`. Anything that needs the metadata map or download state must still use `listBackups()`; retention/prune and the full restore browser continue to depend on the complete scan.
 
 ## Storage lifecycle
 

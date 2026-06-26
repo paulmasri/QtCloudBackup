@@ -148,3 +148,26 @@ public:
     QtCloudBackup::DownloadState metaDownloadState = QtCloudBackup::DownloadState::Local;
 };
 
+// Lightweight counterpart to `BackupInfo`, carrying only what the backup
+// filename encodes: `sourceId`, a UTC `timestamp`, and the `filename` itself.
+// A strict subset of `BackupInfo` — deliberately no `metadata` and no
+// download-state fields — so it can never be mistaken for a fully-populated
+// record. Produced by the digest scan path, which derives every field from
+// the name alone: no `.meta` sidecar is opened, and no cloud placeholder is
+// hydrated. Use this to answer cheap, ongoing questions (does any backup
+// exist? what are the timestamps? which source IDs have backups?) without
+// paying the per-file open/hydration cost of a full listing. Anything that
+// needs `metadata` or download state must use `BackupInfo`.
+class BackupDigest {
+    Q_GADGET
+    QML_VALUE_TYPE(backupDigest)
+    Q_PROPERTY(QString sourceId MEMBER sourceId)
+    Q_PROPERTY(QDateTime timestamp MEMBER timestamp)
+    Q_PROPERTY(QString filename MEMBER filename)
+
+public:
+    QString sourceId;
+    QDateTime timestamp; // UTC, parsed from the filename
+    QString filename;
+};
+
