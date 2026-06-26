@@ -7,7 +7,6 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
-#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QtConcurrent>
 
@@ -495,9 +494,6 @@ void AppleICloudBackend::scanBackups()
             QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
                                               QDir::Files, QDir::Name);
 
-            static const QRegularExpression re(
-                QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
-
             for (const QString &entry : entries) {
                 BackupInfo info;
                 info.filename = entry;
@@ -580,15 +576,8 @@ void AppleICloudBackend::scanBackups()
 
                 // Fallback: parse filename (always needed when .meta is
                 // missing, and a safety net when .meta is malformed)
-                if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
-                    auto match = re.match(entry);
-                    if (match.hasMatch()) {
-                        info.sourceId = match.captured(1);
-                        info.timestamp = QDateTime::fromString(
-                            match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
-                        info.timestamp.setTimeZone(QTimeZone::utc());
-                    }
-                }
+                if (info.sourceId.isEmpty() || !info.timestamp.isValid())
+                    parseBackupFilename(entry, info.sourceId, info.timestamp);
 
                 backups.append(info);
             }
@@ -630,13 +619,7 @@ void AppleICloudBackend::scanBackups()
                         }
 
                         // Parse filename for sourceId + timestamp
-                        auto match = re.match(qName);
-                        if (match.hasMatch()) {
-                            info.sourceId = match.captured(1);
-                            info.timestamp = QDateTime::fromString(
-                                match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
-                            info.timestamp.setTimeZone(QTimeZone::utc());
-                        }
+                        parseBackupFilename(qName, info.sourceId, info.timestamp);
 
                         backups.append(info);
                     }
@@ -648,6 +631,65 @@ void AppleICloudBackend::scanBackups()
             QMetaObject::invokeMethod(qApp, [self, backups] {
                 if (!self) return;
                 emit self->scanCompleted(backups);
+            }, Qt::QueuedConnection);
+        }
+    });
+}
+
+void AppleICloudBackend::scanBackupDigests()
+{
+    QString dir = backupDir();
+    QPointer<AppleICloudBackend> self(this);
+    auto queryGuard = m_queryGuard; // shared_ptr copy for thread safety
+    (void)QtConcurrent::run([self, dir, queryGuard] {
+        @autoreleasepool {
+            QList<BackupDigest> digests;
+            QSet<QString> seen;
+
+            // Local files via QDir — names only, no resource-value probing.
+            QDir d(dir);
+            const QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
+                                                    QDir::Files, QDir::Name);
+            for (const QString &entry : entries) {
+                BackupDigest digest;
+                digest.filename = entry;
+                // Skip names that don't parse — a digest is meaningless
+                // without a sourceId and timestamp.
+                if (!parseBackupFilename(entry, digest.sourceId, digest.timestamp))
+                    continue;
+                seen.insert(entry);
+                digests.append(digest);
+            }
+
+            // Cloud-only files known to the live NSMetadataQuery but absent
+            // from the local directory listing. The query already holds these
+            // names (it drives change notifications), so reading them costs no
+            // .meta open and triggers no hydration.
+            {
+                QMutexLocker locker(&queryGuard->mutex);
+                if (queryGuard->query) {
+                    NSMetadataQuery *query = (__bridge NSMetadataQuery *)queryGuard->query;
+                    [query disableUpdates];
+                    for (NSUInteger i = 0; i < query.resultCount; i++) {
+                        NSMetadataItem *item = [query resultAtIndex:i];
+                        NSString *name = [item valueForAttribute:NSMetadataItemFSNameKey];
+                        QString qName = QString::fromNSString(name);
+                        if (seen.contains(qName))
+                            continue; // Already found via QDir
+                        BackupDigest digest;
+                        digest.filename = qName;
+                        if (!parseBackupFilename(qName, digest.sourceId, digest.timestamp))
+                            continue; // e.g. a .meta sidecar — not a backup row
+                        seen.insert(qName);
+                        digests.append(digest);
+                    }
+                    [query enableUpdates];
+                }
+            }
+
+            QMetaObject::invokeMethod(qApp, [self, digests] {
+                if (!self) return;
+                emit self->digestScanCompleted(digests);
             }, Qt::QueuedConnection);
         }
     });
@@ -950,19 +992,16 @@ void AppleICloudBackend::handleQueryResults()
         NSMetadataQuery *query = (__bridge NSMetadataQuery *)m_queryGuard->query;
         [query disableUpdates];
 
-        static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
-
         QSet<QString> sourceIds;
         for (NSUInteger i = 0; i < query.resultCount; i++) {
             NSMetadataItem *item = [query resultAtIndex:i];
             NSString *name = [item valueForAttribute:NSMetadataItemFSNameKey];
             if (!name)
                 continue;
-            QString qName = QString::fromNSString(name);
-            auto match = re.match(qName);
-            if (match.hasMatch())
-                sourceIds.insert(match.captured(1));
+            QString sourceId;
+            QDateTime timestamp;
+            if (parseBackupFilename(QString::fromNSString(name), sourceId, timestamp))
+                sourceIds.insert(sourceId);
         }
 
         [query enableUpdates];

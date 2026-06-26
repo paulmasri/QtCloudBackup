@@ -9,7 +9,6 @@
 #include <QLoggingCategory>
 #include <QMetaObject>
 #include <QPointer>
-#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
 #include <QSettings>
@@ -450,9 +449,6 @@ void WindowsOneDriveBackend::scanBackups()
         QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
                                           QDir::Files, QDir::Name);
 
-        static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
-
         QList<BackupInfo> backups;
         for (const QString &entry : entries) {
             BackupInfo info;
@@ -500,15 +496,8 @@ void WindowsOneDriveBackend::scanBackups()
 
             // Fallback: parse filename (always needed when .meta is missing,
             // and a safety net when .meta is malformed)
-            if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
-                auto match = re.match(entry);
-                if (match.hasMatch()) {
-                    info.sourceId = match.captured(1);
-                    info.timestamp = QDateTime::fromString(match.captured(2),
-                                                            QStringLiteral("yyyyMMdd_HHmmss_zzz"));
-                    info.timestamp.setTimeZone(QTimeZone::utc());
-                }
-            }
+            if (info.sourceId.isEmpty() || !info.timestamp.isValid())
+                parseBackupFilename(entry, info.sourceId, info.timestamp);
 
             backups.append(info);
         }
@@ -516,6 +505,37 @@ void WindowsOneDriveBackend::scanBackups()
         QMetaObject::invokeMethod(qApp, [self, backups] {
             if (!self) return;
             emit self->scanCompleted(backups);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void WindowsOneDriveBackend::scanBackupDigests()
+{
+    QString dir = backupDir();
+    QPointer<WindowsOneDriveBackend> self(this);
+    (void)QtConcurrent::run([self, dir] {
+        QDir d(dir);
+        const QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
+                                                QDir::Files, QDir::Name);
+
+        // entryList alone — no GetFileAttributesW, no QFile::open. Crucially,
+        // never opening a cloud-only placeholder means the Cloud Files filter
+        // driver is never asked to hydrate it, so this path avoids the
+        // per-file on-demand download cost that the full scan pays. Entries
+        // whose name doesn't parse are skipped — a digest is meaningless
+        // without a sourceId and timestamp.
+        QList<BackupDigest> digests;
+        for (const QString &entry : entries) {
+            BackupDigest digest;
+            digest.filename = entry;
+            if (!parseBackupFilename(entry, digest.sourceId, digest.timestamp))
+                continue;
+            digests.append(digest);
+        }
+
+        QMetaObject::invokeMethod(qApp, [self, digests] {
+            if (!self) return;
+            emit self->digestScanCompleted(digests);
         }, Qt::QueuedConnection);
     });
 }
@@ -589,9 +609,6 @@ void WindowsOneDriveBackend::scanOrphanedBackups()
 
     QPointer<WindowsOneDriveBackend> self(this);
     (void)QtConcurrent::run([self, sources] {
-        static const QRegularExpression re(
-            QStringLiteral("^qtcloudbackup_([a-zA-Z0-9_-]{1,64})_(\\d{8}_\\d{6}_\\d{3})_[a-z0-9]{4}\\.bak$"));
-
         QList<OrphanedBackupInfo> orphans;
         for (const auto &src : sources) {
             QDir d(src.scanDir);
@@ -621,15 +638,8 @@ void WindowsOneDriveBackend::scanOrphanedBackups()
                     info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
                 }
 
-                if (info.sourceId.isEmpty() || !info.timestamp.isValid()) {
-                    const auto match = re.match(entry);
-                    if (match.hasMatch()) {
-                        info.sourceId = match.captured(1);
-                        info.timestamp = QDateTime::fromString(
-                            match.captured(2), QStringLiteral("yyyyMMdd_HHmmss_zzz"));
-                        info.timestamp.setTimeZone(QTimeZone::utc());
-                    }
-                }
+                if (info.sourceId.isEmpty() || !info.timestamp.isValid())
+                    parseBackupFilename(entry, info.sourceId, info.timestamp);
 
                 orphans.append(info);
             }

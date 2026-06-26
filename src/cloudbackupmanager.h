@@ -35,6 +35,12 @@ public:
 
     Q_INVOKABLE void createBackup(const QString &sourceId, const QByteArray &data, const QVariantMap &metadata = {});
     Q_INVOKABLE void listBackups();
+    // Lightweight alternative to listBackups(): emits backupDigestsListed with
+    // sourceId/timestamp/filename derived from filenames alone — no .meta
+    // sidecar reads and no cloud-placeholder hydration. For cheap, repeatable
+    // queries (does any backup exist? newest timestamp? which sourceIds?).
+    // Anything needing metadata or download state must use listBackups().
+    Q_INVOKABLE void listBackupDigests();
     Q_INVOKABLE void requestDownload(const QString &filename);
     Q_INVOKABLE void readBackup(const QString &filename);
     Q_INVOKABLE void deleteBackup(const QString &filename);
@@ -101,6 +107,7 @@ signals:
     void backupFailed(int error, const QString &message);
     void backupsListed(const QList<BackupInfo> &backups);
     void backupsListFailed(int error, const QString &message);
+    void backupDigestsListed(const QList<BackupDigest> &digests);
     void downloadProgressChanged(const QString &filename, qint64 bytesReceived, qint64 bytesTotal);
     void downloadUpdated(const QString &filename, QtCloudBackup::DownloadStatus status,
                          int error, const QString &message);
