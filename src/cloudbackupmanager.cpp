@@ -17,8 +17,18 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     : QObject(parent)
     , m_backend(createPlatformBackend())
 {
+    // hasDetected already reads true inside accountsDetected handlers, but
+    // its NOTIFY fires after them: a consumer that calls select() from its
+    // handler is already `selecting` when bindings see hasDetected flip, so
+    // it never passes through the "detected, nothing selected" state.
     connect(m_backend.get(), &CloudBackupBackend::accountsDetected, this,
-            &CloudBackupManager::accountsDetected);
+            [this](const QList<DetectedAccount> &accounts) {
+                const bool first = !m_hasDetected;
+                m_hasDetected = true;
+                emit accountsDetected(accounts);
+                if (first)
+                    emit hasDetectedChanged();
+            });
 
     connect(m_backend.get(), &CloudBackupBackend::statusChanged, this,
             [this](QtCloudBackup::StorageStatus status, const QString &detail) {
@@ -27,6 +37,11 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
                 emit storageTypeChanged();
                 emit statusChanged(status, detail);
             });
+
+    connect(m_backend.get(), &CloudBackupBackend::selectCompleted, this, [this] {
+        if (m_pendingSelects > 0 && --m_pendingSelects == 0)
+            emit selectingChanged();
+    });
 
     connect(m_backend.get(), &CloudBackupBackend::writeCompleted, this,
             [this](const QString &filename, int error, const QString &message) {
@@ -143,6 +158,16 @@ QString CloudBackupManager::statusDetail() const
 QtCloudBackup::StorageType CloudBackupManager::storageType() const
 {
     return m_backend->storageType();
+}
+
+bool CloudBackupManager::hasDetected() const
+{
+    return m_hasDetected;
+}
+
+bool CloudBackupManager::selecting() const
+{
+    return m_pendingSelects > 0;
 }
 
 bool CloudBackupManager::backupIoBusy() const
@@ -271,6 +296,9 @@ void CloudBackupManager::detect()
 
 void CloudBackupManager::select(const AccountId &id)
 {
+    // Count before delegating: the backend may complete synchronously.
+    if (m_pendingSelects++ == 0)
+        emit selectingChanged();
     m_backend->select(id);
 }
 

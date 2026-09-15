@@ -44,6 +44,9 @@ public:
     // A `Ready` outcome is not permanent. External events (user signs out,
     // policy change, network identity loss) can invalidate the selection
     // later — see `detect()` and the `statusChanged` signal.
+    //
+    // Every call must be followed by exactly one `selectCompleted`, whatever
+    // the outcome — see that signal.
     virtual void select(const AccountId &id) = 0;
 
     // Synchronous resolver over the cached `detect()` result. Returns the
@@ -81,6 +84,12 @@ signals:
     // In-flight file operations may complete with errors after an
     // invalidating `statusChanged` — surface those as errors, not panics.
     void statusChanged(QtCloudBackup::StorageStatus status, const QString &detail);
+    // Emitted exactly once per `select()` call, after any `statusChanged` that
+    // call produces. Also emitted when the call is a no-op, fails fast, or
+    // its outcome is discarded because a newer detection superseded it — in
+    // those cases no `statusChanged` may precede it. May be emitted
+    // synchronously from within `select()`.
+    void selectCompleted();
     void writeCompleted(const QString &filename, int error, const QString &message);
     void readCompleted(const QString &filename, const QByteArray &data, const QJsonObject &meta,
                        int error, const QString &message);

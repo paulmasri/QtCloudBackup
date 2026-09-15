@@ -199,17 +199,21 @@ void WindowsOneDriveBackend::select(const AccountId &id)
         m_status = QtCloudBackup::StorageStatus::Unavailable;
         m_statusDetail = tr("Windows build supports only OneDrive accounts in select()");
         emit statusChanged(m_status, m_statusDetail);
+        emit selectCompleted();
         return;
     }
     if (!m_userFolders.contains(id.accountKey)) {
         m_status = QtCloudBackup::StorageStatus::Unavailable;
         m_statusDetail = tr("Account not in current detection — call detect() first");
         emit statusChanged(m_status, m_statusDetail);
+        emit selectCompleted();
         return;
     }
 
-    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::Ready)
-        return; // reentrant no-op
+    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::Ready) {
+        emit selectCompleted(); // reentrant no-op
+        return;
+    }
 
     const int genAtStart = m_detectionGeneration;
     const QString userFolder = m_userFolders.value(id.accountKey);
@@ -239,8 +243,10 @@ void WindowsOneDriveBackend::select(const AccountId &id)
                             break;
                         }
                     }
-                    if (!stillReady)
+                    if (!stillReady) {
+                        emit self->selectCompleted();
                         return;
+                    }
                 }
                 if (ok) {
                     self->m_backupRoot = userFolder;
@@ -260,6 +266,7 @@ void WindowsOneDriveBackend::select(const AccountId &id)
                     self->m_selectedId = {};
                     emit self->statusChanged(self->m_status, self->m_statusDetail);
                 }
+                emit self->selectCompleted();
             }, Qt::QueuedConnection);
     });
 }

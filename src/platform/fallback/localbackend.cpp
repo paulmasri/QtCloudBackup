@@ -68,11 +68,14 @@ void LocalBackend::select(const AccountId &id)
         m_status = QtCloudBackup::StorageStatus::Unavailable;
         m_statusDetail = tr("Local backend supports only StorageType::LocalDirectory");
         emit statusChanged(m_status, m_statusDetail);
+        emit selectCompleted();
         return;
     }
 
-    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::LocalActive)
-        return; // reentrant no-op
+    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::LocalActive) {
+        emit selectCompleted(); // reentrant no-op
+        return;
+    }
 
     const int genAtStart = m_detectionGeneration;
     const QString dir = backupDir();
@@ -101,8 +104,10 @@ void LocalBackend::select(const AccountId &id)
                         break;
                     }
                 }
-                if (!stillReady)
+                if (!stillReady) {
+                    emit self->selectCompleted();
                     return;
+                }
             }
             if (ok) {
                 self->m_selectedId = id;
@@ -115,6 +120,7 @@ void LocalBackend::select(const AccountId &id)
                 self->m_selectedId = {};
                 emit self->statusChanged(self->m_status, self->m_statusDetail);
             }
+            emit self->selectCompleted();
         }, Qt::QueuedConnection);
     });
 }
