@@ -17,8 +17,17 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     : QObject(parent)
     , m_backend(createPlatformBackend())
 {
+    // Change hasDetected only after the accountsDetected handlers have run.
+    // If a handler calls select(), selecting is already true by the time
+    // hasDetected changes.
     connect(m_backend.get(), &CloudBackupBackend::accountsDetected, this,
-            &CloudBackupManager::accountsDetected);
+            [this](const QList<DetectedAccount> &accounts) {
+                emit accountsDetected(accounts);
+                if (!m_hasDetected) {
+                    m_hasDetected = true;
+                    emit hasDetectedChanged();
+                }
+            });
 
     connect(m_backend.get(), &CloudBackupBackend::statusChanged, this,
             [this](QtCloudBackup::StorageStatus status, const QString &detail) {
@@ -27,6 +36,11 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
                 emit storageTypeChanged();
                 emit statusChanged(status, detail);
             });
+
+    connect(m_backend.get(), &CloudBackupBackend::selectCompleted, this, [this] {
+        if (m_pendingSelects > 0 && --m_pendingSelects == 0)
+            emit selectingChanged();
+    });
 
     connect(m_backend.get(), &CloudBackupBackend::writeCompleted, this,
             [this](const QString &filename, int error, const QString &message) {
@@ -143,6 +157,16 @@ QString CloudBackupManager::statusDetail() const
 QtCloudBackup::StorageType CloudBackupManager::storageType() const
 {
     return m_backend->storageType();
+}
+
+bool CloudBackupManager::hasDetected() const
+{
+    return m_hasDetected;
+}
+
+bool CloudBackupManager::selecting() const
+{
+    return m_pendingSelects > 0;
 }
 
 bool CloudBackupManager::backupIoBusy() const
@@ -271,6 +295,9 @@ void CloudBackupManager::detect()
 
 void CloudBackupManager::select(const AccountId &id)
 {
+    // Count before delegating: the backend may complete synchronously.
+    if (m_pendingSelects++ == 0)
+        emit selectingChanged();
     m_backend->select(id);
 }
 

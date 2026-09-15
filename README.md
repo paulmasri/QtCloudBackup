@@ -159,6 +159,8 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `storageStatus` | `StorageStatus` | Current storage availability |
 | `statusDetail` | `QString` | Human-readable status detail |
 | `storageType` | `StorageType` | Which backend is active |
+| `hasDetected` | `bool` | `false` until the handlers for the first `accountsDetected` have run, then `true` for the lifetime of the manager. Detecting again never sets it back to `false`. See [Interpreting `Unknown`](#interpreting-unknown). |
+| `selecting` | `bool` | `true` while any `select()` call is still in progress. A call counts as finished when its result has been applied or discarded (for example, because a newer detection replaced it). See [Interpreting `Unknown`](#interpreting-unknown). |
 | `backupIoBusy` | `bool` | Whether the library is mid-IO with the storage backend (create or read path) |
 | `retentionPolicy` | `RetentionPolicy` | Configurable union-of-keeps retention (default: `{ keepLast = 3 }`). See [How pruning works](#how-pruning-works). |
 | `hasOrphanedBackups` | `bool` | Whether orphaned backups were found (see [Orphaned backup migration](#orphaned-backup-migration)) |
@@ -313,6 +315,16 @@ Item {
         }
     }
 
+    // Status rendering — see "Interpreting Unknown"
+    readonly property bool connecting:
+        backupManager.storageStatus === QtCloudBackup.StorageStatus.Unknown
+        && (!backupManager.hasDetected || backupManager.selecting)
+    readonly property bool notConnected:
+        backupManager.storageStatus === QtCloudBackup.StorageStatus.Unavailable
+        || backupManager.storageStatus === QtCloudBackup.StorageStatus.Disabled
+        || (backupManager.storageStatus === QtCloudBackup.StorageStatus.Unknown
+            && backupManager.hasDetected && !backupManager.selecting)
+
     // Create a backup
     function save(sourceId, payload) {
         backupManager.createBackup(sourceId, payload, { "device": "iPhone" })
@@ -457,13 +469,50 @@ CloudBackupManager {
 
 `select()` is **reentrant** — calling it with a different `AccountId` switches the active target without tearing down the backend. **Switching does not migrate existing backups**: backups already on the previous target remain there as orphans. Migration is a separate, explicit operation via [Orphaned backup migration](#orphaned-backup-migration); implicit migration on every `select()` would be surprising (a user who picks the wrong account and switches back wouldn't expect a round-trip of file moves).
 
+### Interpreting `Unknown`
+
+`storageStatus` describes the **selected account**. So `Unknown` only means that no account is selected right now. A UI should show this differently depending on the reason:
+
+| Situation | `hasDetected` | `selecting` | Show |
+|---|---|---|---|
+| Detection hasn't finished | `false` | any | Connecting |
+| A `select()` call is in progress | `true` | `true` | Connecting |
+| Detection has finished and nothing is selected | `true` | `false` | Not connected |
+
+These rules work however the consumer chooses an account:
+
+| Consumer state | Condition |
+|---|---|
+| Connecting | `status == Unknown && (!hasDetected \|\| selecting)` |
+| Not connected | `status == Unavailable \|\| status == Disabled \|\| (status == Unknown && hasDetected && !selecting)` |
+
+When not connected, use the detected accounts to decide what to show:
+
+- **No Ready account** (for example, Windows with no OneDrive accounts): prompt the user to set up storage.
+- **At least one Ready account:** show your picker, or whatever flow your app uses to choose an account.
+
+The library tracks `hasDetected` and `selecting` because a consumer can't track them reliably:
+
+- Detection can start without the consumer calling `detect()`. On Apple, the library detects again whenever the iCloud account changes.
+- When a newer detection causes a `select()` result to be discarded, no `statusChanged` is emitted.
+
+Timing details:
+
+- `hasDetected` never goes back to `false`. So a UI using these rules doesn't return to "connecting" each time detection runs again.
+- `hasDetectedChanged` is emitted after the `accountsDetected` handlers have run. Within those handlers, `hasDetected` still has its previous value, which is `false` the first time.
+- If an `accountsDetected` handler calls `select()` directly, `selecting` is already `true` when `hasDetected` changes. The UI goes straight from "connecting" to the result of the selection.
+- If the consumer calls `select()` later (for example, after the user picks from a list, or via `Qt.callLater`), the UI shows "not connected" until that call is made.
+- `selecting` stays `true` until **every** `select()` call in progress has finished.
+
+See the [QML usage example](#qml-usage-example) for these rules as bindings.
+
 ## Status semantics
 
 `StorageStatus` values map to **distinct user remediation flows** rather than to distinct technical causes. If two states would lead the user to take the same next action, they collapse into one value.
 
 | Value | Meaning | Who can fix |
 |---|---|---|
-| `Unknown` | Pre-`detect()`. No detection has run yet. | — |
+| `Unknown` | No account is selected. This covers three cases: detection hasn't finished, detection has finished but nothing is selected (for example, Windows with no OneDrive accounts), or `select()` hasn't finished. See [Interpreting `Unknown`](#interpreting-unknown). | — |
 | `Ready` | Storage is available and writable. Per-`DetectedAccount` during detection: "selectable". After `select()`: "the active target is up". | — |
 | `Unavailable` | Storage is not configured. User can complete setup (install client / sign in / enable service). | User |
 | `Disabled` | Storage is configured-but-blocked by something outside the user's control (IT policy, missing entitlements, unlicensed account, tenant restriction). | Nobody locally |
@@ -486,6 +535,7 @@ UI implication: `Disabled` rows should explain the situation without inviting a 
 | Condition | Status |
 |---|---|
 | Device-level `DisableFileSyncNGSC = 1` | Backend-level `Disabled`; no accounts enumerated |
+| No complete accounts (client not installed / no one signed in) | `accountsDetected` with an empty list; `storageStatus()` stays `Unknown` |
 | Account fields incomplete (signed-out residue, partial config) | Suppressed — skipped at detection, not surfaced |
 | Personal account with `DisablePersonalSync = 1` (HKCU or HKLM) | `Disabled` (per account) |
 | Business account blocked by `AllowTenantList` / `BlockTenantList` | `Disabled` (per account) |

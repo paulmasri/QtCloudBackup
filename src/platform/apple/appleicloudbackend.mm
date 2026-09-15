@@ -112,17 +112,21 @@ void AppleICloudBackend::select(const AccountId &id)
         m_status = QtCloudBackup::StorageStatus::Unavailable;
         m_statusDetail = tr("Apple build supports only StorageType::ICloud");
         emit statusChanged(m_status, m_statusDetail);
+        emit selectCompleted();
         return;
     }
     if (m_pendingContainerRoot.isEmpty()) {
         m_status = QtCloudBackup::StorageStatus::Unavailable;
         m_statusDetail = tr("iCloud container not yet resolved — call detect() first");
         emit statusChanged(m_status, m_statusDetail);
+        emit selectCompleted();
         return;
     }
 
-    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::Ready)
-        return; // reentrant no-op
+    if (m_selectedId == id && m_status == QtCloudBackup::StorageStatus::Ready) {
+        emit selectCompleted(); // reentrant no-op
+        return;
+    }
 
     // Freeze the detection generation at the start of directory creation.
     // If a detect() runs while we're mid-flight and concludes the target
@@ -160,8 +164,10 @@ void AppleICloudBackend::select(const AccountId &id)
                             break;
                         }
                     }
-                    if (!stillReady)
+                    if (!stillReady) {
+                        emit self->selectCompleted();
                         return;
+                    }
                 }
                 if (ok) {
                     self->m_containerUrl = QUrl::fromLocalFile(backupsPath);
@@ -179,6 +185,7 @@ void AppleICloudBackend::select(const AccountId &id)
                     self->stopMetadataQuery();
                     emit self->statusChanged(self->m_status, self->m_statusDetail);
                 }
+                emit self->selectCompleted();
             }, Qt::QueuedConnection);
         }
     });

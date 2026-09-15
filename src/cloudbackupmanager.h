@@ -17,6 +17,8 @@ class CloudBackupManager : public QObject {
     Q_PROPERTY(QtCloudBackup::StorageStatus storageStatus READ storageStatus NOTIFY storageStatusChanged)
     Q_PROPERTY(QString statusDetail READ statusDetail NOTIFY statusDetailChanged)
     Q_PROPERTY(QtCloudBackup::StorageType storageType READ storageType NOTIFY storageTypeChanged)
+    Q_PROPERTY(bool hasDetected READ hasDetected NOTIFY hasDetectedChanged)
+    Q_PROPERTY(bool selecting READ selecting NOTIFY selectingChanged)
     Q_PROPERTY(bool backupIoBusy READ backupIoBusy NOTIFY backupIoBusyChanged)
     Q_PROPERTY(QtCloudBackup::RetentionPolicy retentionPolicy READ retentionPolicy WRITE setRetentionPolicy NOTIFY retentionPolicyChanged)
     Q_PROPERTY(bool hasOrphanedBackups READ hasOrphanedBackups NOTIFY hasOrphanedBackupsChanged)
@@ -28,6 +30,14 @@ public:
     QtCloudBackup::StorageStatus storageStatus() const;
     QString statusDetail() const;
     QtCloudBackup::StorageType storageType() const;
+    // False until the handlers for the first accountsDetected have run, then
+    // true for the lifetime of the manager. Detecting again never sets it
+    // back to false.
+    bool hasDetected() const;
+    // True while any select() call is still in progress. A call counts as
+    // finished when its result has been applied or discarded (for example,
+    // because a newer detection replaced it).
+    bool selecting() const;
     bool backupIoBusy() const;
     QtCloudBackup::RetentionPolicy retentionPolicy() const;
     void setRetentionPolicy(const QtCloudBackup::RetentionPolicy &policy);
@@ -97,6 +107,8 @@ signals:
     void storageStatusChanged();
     void statusDetailChanged();
     void storageTypeChanged();
+    void hasDetectedChanged();
+    void selectingChanged();
     void backupIoBusyChanged();
     void retentionPolicyChanged();
     void hasOrphanedBackupsChanged();
@@ -128,6 +140,8 @@ private:
     void handleReadFailed(const QString &filename, int error, const QString &message);
 
     std::unique_ptr<CloudBackupBackend> m_backend;
+    bool m_hasDetected = false;
+    int m_pendingSelects = 0;
     bool m_backupIoBusy = false;
     QtCloudBackup::RetentionPolicy m_retentionPolicy = { .keepLast = 3 };
     QString m_currentBackupSourceId;
