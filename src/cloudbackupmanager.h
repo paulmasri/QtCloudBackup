@@ -30,12 +30,13 @@ public:
     QtCloudBackup::StorageStatus storageStatus() const;
     QString statusDetail() const;
     QtCloudBackup::StorageType storageType() const;
-    // False until the first accountsDetected, then true for the lifetime of
-    // the manager. Re-detection never resets it.
+    // False until the handlers for the first accountsDetected have run, then
+    // true for the lifetime of the manager. Detecting again never sets it
+    // back to false.
     bool hasDetected() const;
-    // True from select() entry until every in-flight select() has reached an
-    // outcome, including outcomes discarded because a newer detection
-    // superseded them.
+    // True while any select() call is still in progress. A call counts as
+    // finished when its result has been applied or discarded (for example,
+    // because a newer detection replaced it).
     bool selecting() const;
     bool backupIoBusy() const;
     QtCloudBackup::RetentionPolicy retentionPolicy() const;

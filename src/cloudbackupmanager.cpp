@@ -17,17 +17,16 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     : QObject(parent)
     , m_backend(createPlatformBackend())
 {
-    // hasDetected already reads true inside accountsDetected handlers, but
-    // its NOTIFY fires after them: a consumer that calls select() from its
-    // handler is already `selecting` when bindings see hasDetected flip, so
-    // it never passes through the "detected, nothing selected" state.
+    // Change hasDetected only after the accountsDetected handlers have run.
+    // If a handler calls select(), selecting is already true by the time
+    // hasDetected changes.
     connect(m_backend.get(), &CloudBackupBackend::accountsDetected, this,
             [this](const QList<DetectedAccount> &accounts) {
-                const bool first = !m_hasDetected;
-                m_hasDetected = true;
                 emit accountsDetected(accounts);
-                if (first)
+                if (!m_hasDetected) {
+                    m_hasDetected = true;
                     emit hasDetectedChanged();
+                }
             });
 
     connect(m_backend.get(), &CloudBackupBackend::statusChanged, this,

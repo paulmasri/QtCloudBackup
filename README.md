@@ -159,8 +159,8 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `storageStatus` | `StorageStatus` | Current storage availability |
 | `statusDetail` | `QString` | Human-readable status detail |
 | `storageType` | `StorageType` | Which backend is active |
-| `hasDetected` | `bool` | `false` until the first `accountsDetected`, then `true` for the lifetime of the manager. Never resets on re-detection. See [Interpreting `Unknown`](#interpreting-unknown). |
-| `selecting` | `bool` | `true` while any `select()` call is in flight — from entry until its outcome has been applied or discarded (e.g. superseded by a newer detection). See [Interpreting `Unknown`](#interpreting-unknown). |
+| `hasDetected` | `bool` | `false` until the handlers for the first `accountsDetected` have run, then `true` for the lifetime of the manager. Detecting again never sets it back to `false`. See [Interpreting `Unknown`](#interpreting-unknown). |
+| `selecting` | `bool` | `true` while any `select()` call is still in progress. A call counts as finished when its result has been applied or discarded (for example, because a newer detection replaced it). See [Interpreting `Unknown`](#interpreting-unknown). |
 | `backupIoBusy` | `bool` | Whether the library is mid-IO with the storage backend (create or read path) |
 | `retentionPolicy` | `RetentionPolicy` | Configurable union-of-keeps retention (default: `{ keepLast = 3 }`). See [How pruning works](#how-pruning-works). |
 | `hasOrphanedBackups` | `bool` | Whether orphaned backups were found (see [Orphaned backup migration](#orphaned-backup-migration)) |
@@ -319,7 +319,7 @@ Item {
     readonly property bool connecting:
         backupManager.storageStatus === QtCloudBackup.StorageStatus.Unknown
         && (!backupManager.hasDetected || backupManager.selecting)
-    readonly property bool needsSetup:
+    readonly property bool notConnected:
         backupManager.storageStatus === QtCloudBackup.StorageStatus.Unavailable
         || backupManager.storageStatus === QtCloudBackup.StorageStatus.Disabled
         || (backupManager.storageStatus === QtCloudBackup.StorageStatus.Unknown
@@ -471,28 +471,40 @@ CloudBackupManager {
 
 ### Interpreting `Unknown`
 
-`storageStatus` describes the **active selection**, so `Unknown` only means "nothing is selected right now". That covers situations a UI should render differently:
+`storageStatus` describes the **selected account**. So `Unknown` only means that no account is selected right now. A UI should show this differently depending on the reason:
 
-| Situation | `hasDetected` | `selecting` | Render as |
+| Situation | `hasDetected` | `selecting` | Show |
 |---|---|---|---|
-| Detection hasn't completed yet | `false` | — | Connecting |
-| A `select()` is in flight | `true` | `true` | Connecting |
-| Detection completed and nothing is selected (no Ready account — e.g. Windows with no OneDrive accounts — or the consumer chose not to select) | `true` | `false` | Needs setup |
+| Detection hasn't finished | `false` | any | Connecting |
+| A `select()` call is in progress | `true` | `true` | Connecting |
+| Detection has finished and nothing is selected | `true` | `false` | Not connected |
 
-So a rendering rule needs no knowledge of the consumer's selection strategy:
+These rules work however the consumer chooses an account:
 
 | Consumer state | Condition |
 |---|---|
 | Connecting | `status == Unknown && (!hasDetected \|\| selecting)` |
-| Needs setup / cannot connect | `status == Unavailable \|\| status == Disabled \|\| (status == Unknown && hasDetected && !selecting)` |
+| Not connected | `status == Unavailable \|\| status == Disabled \|\| (status == Unknown && hasDetected && !selecting)` |
 
-The library tracks both flags because a consumer can't do so reliably: detection can start without a consumer call (Apple re-detects on iCloud identity changes), and a `select()` whose outcome is discarded by a newer detection emits no `statusChanged`.
+When not connected, use the detected accounts to decide what to show:
 
-- `hasDetected` never resets, so a UI bound to the rule doesn't flip back to "connecting" each time detection re-runs.
-- `hasDetected` already reads `true` inside `accountsDetected` handlers, but `hasDetectedChanged` is emitted after those handlers return. A consumer that calls `select()` from its handler is therefore already `selecting` when bindings see `hasDetected` change, and never passes through "needs setup".
-- `selecting` stays `true` until **every** overlapping `select()` call has reached an outcome.
+- **No Ready account** (for example, Windows with no OneDrive accounts): prompt the user to set up storage.
+- **At least one Ready account:** show your picker, or whatever flow your app uses to choose an account.
 
-See the [QML usage example](#qml-usage-example) for the rule as bindings.
+The library tracks `hasDetected` and `selecting` because a consumer can't track them reliably:
+
+- Detection can start without the consumer calling `detect()`. On Apple, the library detects again whenever the iCloud account changes.
+- When a newer detection causes a `select()` result to be discarded, no `statusChanged` is emitted.
+
+Timing details:
+
+- `hasDetected` never goes back to `false`. So a UI using these rules doesn't return to "connecting" each time detection runs again.
+- `hasDetectedChanged` is emitted after the `accountsDetected` handlers have run. Within those handlers, `hasDetected` still has its previous value, which is `false` the first time.
+- If an `accountsDetected` handler calls `select()` directly, `selecting` is already `true` when `hasDetected` changes. The UI goes straight from "connecting" to the result of the selection.
+- If the consumer calls `select()` later (for example, after the user picks from a list, or via `Qt.callLater`), the UI shows "not connected" until that call is made.
+- `selecting` stays `true` until **every** `select()` call in progress has finished.
+
+See the [QML usage example](#qml-usage-example) for these rules as bindings.
 
 ## Status semantics
 
@@ -500,7 +512,7 @@ See the [QML usage example](#qml-usage-example) for the rule as bindings.
 
 | Value | Meaning | Who can fix |
 |---|---|---|
-| `Unknown` | No active selection. Detection hasn't completed yet, detection completed with nothing selected (e.g. Windows with no OneDrive accounts), or `select()` hasn't completed yet. See [Interpreting `Unknown`](#interpreting-unknown). | — |
+| `Unknown` | No account is selected. This covers three cases: detection hasn't finished, detection has finished but nothing is selected (for example, Windows with no OneDrive accounts), or `select()` hasn't finished. See [Interpreting `Unknown`](#interpreting-unknown). | — |
 | `Ready` | Storage is available and writable. Per-`DetectedAccount` during detection: "selectable". After `select()`: "the active target is up". | — |
 | `Unavailable` | Storage is not configured. User can complete setup (install client / sign in / enable service). | User |
 | `Disabled` | Storage is configured-but-blocked by something outside the user's control (IT policy, missing entitlements, unlicensed account, tenant restriction). | Nobody locally |
