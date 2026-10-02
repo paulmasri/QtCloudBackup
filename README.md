@@ -595,6 +595,15 @@ The `pruning` property is `true` while any prune is running:
 
 A list read while `pruning` is `true` can include a backup that is about to be deleted. A consumer that shows backups for the user to pick should wait for `pruning` to go `false`, then call `listBackups()` again.
 
+### A prune has no success or failure signal
+
+`createBackup()` and `readBackup()` each end with their own success or failure signal. A prune deliberately doesn't. A prune is housekeeping: whatever its outcome, the consumer has nothing to do about it. So `pruning` going `false` is the only sign that it has finished, and it doesn't say how it went:
+- each file a prune deletes gets reported through `deleteSucceeded` or `deleteFailed`, the same signals that `deleteBackup()` uses. A consumer can't tell the prune's deletes from its own;
+- if the prune's scan fails or times out, the prune ends without deleting anything. The library logs a warning under the `qtcloudbackup.manager` logging category, and emits no signal;
+- when two prunes overlap, `pruning` only goes `false` once both have finished. A consumer can't tell when either one finished on its own.
+
+None of these needs handling. A prune that fails does no harm: the backups it would have deleted stay until the next prune, which runs after the next successful backup or the next accepted `prune()` call.
+
 ### Worked examples
 
 #### Today + recent days

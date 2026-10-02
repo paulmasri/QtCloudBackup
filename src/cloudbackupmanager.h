@@ -77,6 +77,9 @@ public:
     // if no matching account is currently detected; otherwise the resolved
     // AccountId, suitable for passing straight to select().
     Q_INVOKABLE AccountId resolveAccount(const DurableAccountIdentity &identity) const;
+    // Emits no success or failure signal of its own, by design: whatever the
+    // outcome, the caller has nothing to do about it. `pruning` shows when it
+    // has finished. A refused call does nothing.
     Q_INVOKABLE void prune(const QString &sourceId);
     Q_INVOKABLE void checkForOrphanedBackups();
     Q_INVOKABLE void migrateOrphanedBackups();
