@@ -4,6 +4,7 @@
 #include "retentionpolicy.h"
 
 #include <QHash>
+#include <QSet>
 #include <QObject>
 #include <QVariantMap>
 #include <QtQml/qqmlregistration.h>
@@ -22,6 +23,7 @@ class CloudBackupManager : public QObject {
     Q_PROPERTY(bool hasDetected READ hasDetected NOTIFY hasDetectedChanged)
     Q_PROPERTY(bool selecting READ selecting NOTIFY selectingChanged)
     Q_PROPERTY(bool backupIoBusy READ backupIoBusy NOTIFY backupIoBusyChanged)
+    Q_PROPERTY(bool pruning READ pruning NOTIFY pruningChanged)
     Q_PROPERTY(QtCloudBackup::RetentionPolicy retentionPolicy READ retentionPolicy WRITE setRetentionPolicy NOTIFY retentionPolicyChanged)
     Q_PROPERTY(bool hasOrphanedBackups READ hasOrphanedBackups NOTIFY hasOrphanedBackupsChanged)
 
@@ -41,6 +43,12 @@ public:
     // because a newer detection replaced it).
     bool selecting() const;
     bool backupIoBusy() const;
+    // True while any prune is still running. A prune finishes when its scan
+    // finds nothing to delete, when every file it deleted has reported back,
+    // or when its scan fails or times out. After a successful backup this
+    // goes true before backupIoBusy goes false, so the two never both read
+    // false between the write and its prune.
+    bool pruning() const;
     QtCloudBackup::RetentionPolicy retentionPolicy() const;
     void setRetentionPolicy(const QtCloudBackup::RetentionPolicy &policy);
     bool hasOrphanedBackups() const;
@@ -112,6 +120,7 @@ signals:
     void hasDetectedChanged();
     void selectingChanged();
     void backupIoBusyChanged();
+    void pruningChanged();
     void retentionPolicyChanged();
     void hasOrphanedBackupsChanged();
 
@@ -151,6 +160,10 @@ private:
     std::optional<PendingScan> takePendingScan(quint64 requestId);
     void applyRetention(const QString &sourceId, const QtCloudBackup::RetentionPolicy &policy,
                         const QList<BackupInfo> &backups);
+    // The only places that change m_activePrunes. Every beginPrune() is
+    // matched by exactly one endPrune().
+    void beginPrune();
+    void endPrune();
 
     void handleReadFailed(const QString &filename, int error, const QString &message);
 
@@ -158,6 +171,10 @@ private:
     bool m_hasDetected = false;
     int m_pendingSelects = 0;
     bool m_backupIoBusy = false;
+    int m_activePrunes = 0;
+    // One set per prune that has deletes outstanding, oldest first. Each
+    // holds the filenames that prune is still waiting to hear back about.
+    QList<QSet<QString>> m_pruneDeletes;
     QtCloudBackup::RetentionPolicy m_retentionPolicy = { .keepLast = 3 };
     QString m_currentBackupSourceId;
     QDateTime m_currentBackupTimestamp;

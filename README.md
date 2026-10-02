@@ -162,6 +162,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `hasDetected` | `bool` | `false` until the handlers for the first `accountsDetected` have run, then `true` for the lifetime of the manager. Detecting again never sets it back to `false`. See [Interpreting `Unknown`](#interpreting-unknown). |
 | `selecting` | `bool` | `true` while any `select()` call is still in progress. A call counts as finished when its result has been applied or discarded (for example, because a newer detection replaced it). See [Interpreting `Unknown`](#interpreting-unknown). |
 | `backupIoBusy` | `bool` | Whether the library is mid-IO with the storage backend (create or read path) |
+| `pruning` | `bool` | `true` from the moment a prune is due until it has finished. See [Knowing when a prune has finished](#knowing-when-a-prune-has-finished). |
 | `retentionPolicy` | `RetentionPolicy` | Configurable union-of-keeps retention (default: `{ keepLast = 3 }`). See [How pruning works](#how-pruning-works). |
 | `hasOrphanedBackups` | `bool` | Whether orphaned backups were found (see [Orphaned backup migration](#orphaned-backup-migration)) |
 
@@ -178,7 +179,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `detect()` | Stage 1: enumerate candidate accounts. No filesystem side effects. Result delivered via `accountsDetected`. See [Storage lifecycle](#storage-lifecycle). |
 | `select(id)` | Stage 2: activate the chosen account. `id` is the `AccountId` from a `DetectedAccount.id` (or the resolved id from `resolveAccount`). Creates the backup subdirectory; brings up platform machinery. Status delivered via `statusChanged`. Reentrant — switching does not migrate existing backups. |
 | `resolveAccount(identity)` | Maps a persisted `DurableAccountIdentity` to the current in-memory `AccountId`. Returns an `AccountId` whose `type == StorageType::None` if the account is no longer detected; otherwise the resolved `AccountId`, suitable for passing straight to `select()`. |
-| `prune(sourceId)` | Apply the current `retentionPolicy` to `sourceId` immediately. Useful after a policy change. No-op while a backup is in progress. |
+| `prune(sourceId)` | Apply the current `retentionPolicy` to `sourceId` immediately. Useful after a policy change. No-op while `backupIoBusy` is true; `pruning` does not change. |
 | `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
 | `makeRetentionPolicy(keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly)` | Factory for constructing a `RetentionPolicy` from QML — gadget value types can't be assembled via JS-object literals. See [QML usage example](#qml-usage-example). |
@@ -583,6 +584,14 @@ When re-detection finds that the previously-selected account is no longer `Ready
 QtCloudBackup uses the **union-of-keeps** retention model familiar from Borg, restic, sanoid, rsnapshot, and (in hardcoded form) Apple Time Machine. A `RetentionPolicy` is a flat collection of five independent keep rules; the set of backups *kept* is the union of every rule's selection, the set *pruned* is everything else. Rules are order-agnostic — `keepDaily 7 + keepWeekly 4` produces the same result as `keepWeekly 4 + keepDaily 7` — and a single backup can satisfy multiple rules (it's kept once).
 
 Pruning runs automatically after each successful `createBackup()` against the just-written `sourceId`, and can be triggered manually via `prune(sourceId)`. The library never persists the policy itself — the consuming app owns persistence (typically `QSettings`) and sets the policy on the manager at startup.
+
+### Knowing when a prune has finished
+
+The `pruning` property is `true` while any prune is running:
+- after a successful backup, `pruning` goes `true` before `backupIoBusy` goes `false` and before `backupSucceeded` is emitted. So `backupIoBusy || pruning` stays `true` from the start of the write until its prune has finished;
+- `pruning` goes `false` once the prune's scan finds nothing to delete, or once every file it deleted has a `deleteSucceeded` or `deleteFailed`. It also goes `false` if the scan fails, or gets no result within 10 s.
+
+A list read while `pruning` is `true` can include a backup that is about to be deleted. A consumer that shows backups for the user to pick should wait for `pruning` to go `false`, then call `listBackups()` again.
 
 ### Worked examples
 
