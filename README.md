@@ -170,7 +170,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | Method | Description |
 |--------|-------------|
 | `createBackup(sourceId, data, metadata)` | Write a backup with optional metadata map |
-| `listBackups()` | Scan for all backups (full metadata). Every call ends with exactly one of `backupsListed` or `backupsListFailed`. |
+| `listBackups()` | Scan for all backups (full metadata). Every call ends with exactly one of `backupsListed` or `backupsListFailed`. If no result arrives within 10 s, it ends with `backupsListFailed(ScanTimeout, …)`, and a later result is discarded. |
 | `listBackupDigests()` | Lightweight scan — emit `backupDigestsListed` with `sourceId`/`timestamp`/`filename` derived from filenames alone. No `.meta` sidecar reads, no cloud-placeholder hydration. See [Lightweight digest listing](#lightweight-digest-listing). |
 | `readBackup(filename)` | Fetch a backup's bytes and metadata; auto-downloads if cloud-only |
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
@@ -218,7 +218,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 
 **MigrationStatus**: `MigrationInProgress`, `MigrationSucceeded`, `MigrationFailed`
 
-**BackupError**: `NoError`, `InvalidArgument`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadError`, `DownloadTimeout`, `MigrationPartial`, `UnknownError`
+**BackupError**: `NoError`, `InvalidArgument`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadError`, `DownloadTimeout`, `MigrationPartial`, `ScanTimeout`, `UnknownError`
 
 ### Value types
 

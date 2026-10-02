@@ -7,9 +7,15 @@
 #include <QJsonObject>
 #include <QLoggingCategory>
 #include <QRandomGenerator>
+#include <QTimer>
 #include <algorithm>
 
 Q_LOGGING_CATEGORY(managerLog, "qtcloudbackup.manager")
+
+// A Windows scan opens every .meta file, and a cloud-only one takes about
+// 0.3 s to download, so this allows for about 30 of them. The downloads carry
+// on after a timeout, so the next scan finds those files already local.
+static constexpr std::chrono::seconds ScanTimeoutDuration{10};
 
 std::unique_ptr<CloudBackupBackend> createPlatformBackend();
 
@@ -387,6 +393,17 @@ void CloudBackupManager::startScan(const PendingScan &scan)
 {
     const quint64 requestId = ++m_nextScanId;
     m_pendingScans.insert(requestId, scan);
+    QTimer::singleShot(ScanTimeoutDuration, this, [this, requestId] {
+        const auto timedOut = takePendingScan(requestId);
+        if (!timedOut)
+            return;
+        if (timedOut->purpose == PendingScan::Purpose::List)
+            emit backupsListFailed(int(QtCloudBackup::BackupError::ScanTimeout),
+                                   tr("Backup scan timed out"));
+        else
+            qCWarning(managerLog, "prune scan timed out (sourceId=%s)",
+                      qPrintable(timedOut->sourceId));
+    });
     m_backend->scanBackups(requestId);
 }
 
