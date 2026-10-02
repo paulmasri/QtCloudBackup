@@ -7,9 +7,15 @@
 #include <QJsonObject>
 #include <QLoggingCategory>
 #include <QRandomGenerator>
+#include <QTimer>
 #include <algorithm>
 
 Q_LOGGING_CATEGORY(managerLog, "qtcloudbackup.manager")
+
+// A Windows scan opens every .meta file, and a cloud-only one takes about
+// 0.3 s to download, so this allows for about 30 of them. The downloads carry
+// on after a timeout, so the next scan finds those files already local.
+static constexpr std::chrono::seconds ScanTimeoutDuration{10};
 
 std::unique_ptr<CloudBackupBackend> createPlatformBackend();
 
@@ -55,7 +61,27 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
             });
 
     connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
-            &CloudBackupManager::backupsListed);
+            [this](quint64 requestId, const QList<BackupInfo> &backups) {
+                const auto scan = takePendingScan(requestId);
+                if (!scan)
+                    return;
+                if (scan->purpose == PendingScan::Purpose::List)
+                    emit backupsListed(backups);
+                else
+                    applyRetention(scan->sourceId, scan->policy, backups);
+            });
+
+    connect(m_backend.get(), &CloudBackupBackend::scanFailed, this,
+            [this](quint64 requestId, int error, const QString &message) {
+                const auto scan = takePendingScan(requestId);
+                if (!scan)
+                    return;
+                if (scan->purpose == PendingScan::Purpose::List)
+                    emit backupsListFailed(error, message);
+                else
+                    qCWarning(managerLog, "prune scan failed (sourceId=%s): %s",
+                              qPrintable(scan->sourceId), qPrintable(message));
+            });
 
     connect(m_backend.get(), &CloudBackupBackend::digestScanCompleted, this,
             &CloudBackupManager::backupDigestsListed);
@@ -240,7 +266,7 @@ void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray 
 
 void CloudBackupManager::listBackups()
 {
-    m_backend->scanBackups();
+    startScan({ PendingScan::Purpose::List, {}, {} });
 }
 
 void CloudBackupManager::listBackupDigests()
@@ -360,25 +386,50 @@ void CloudBackupManager::pruneBackups(const QString &sourceId)
         return;
     }
 
-    const QtCloudBackup::RetentionPolicy policy = m_retentionPolicy;
-    auto conn = std::make_shared<QMetaObject::Connection>();
-    *conn = connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
-                    [this, sourceId, conn, policy](const QList<BackupInfo> &backups) {
-                        disconnect(*conn);
+    startScan({ PendingScan::Purpose::Prune, sourceId, m_retentionPolicy });
+}
 
-                        QList<BackupInfo> matching;
-                        for (const auto &b : backups) {
-                            if (b.sourceId == sourceId)
-                                matching.append(b);
-                        }
+void CloudBackupManager::startScan(const PendingScan &scan)
+{
+    const quint64 requestId = ++m_nextScanId;
+    m_pendingScans.insert(requestId, scan);
+    QTimer::singleShot(ScanTimeoutDuration, this, [this, requestId] {
+        const auto timedOut = takePendingScan(requestId);
+        if (!timedOut)
+            return;
+        if (timedOut->purpose == PendingScan::Purpose::List)
+            emit backupsListFailed(int(QtCloudBackup::BackupError::ScanTimeout),
+                                   tr("Backup scan timed out"));
+        else
+            qCWarning(managerLog, "prune scan timed out (sourceId=%s)",
+                      qPrintable(timedOut->sourceId));
+    });
+    m_backend->scanBackups(requestId);
+}
 
-                        const auto result =
-                            QtCloudBackup::RetentionEvaluator::evaluate(matching, policy);
-                        for (const QString &filename : result.toDelete)
-                            m_backend->deleteBackup(filename);
-                    });
+std::optional<CloudBackupManager::PendingScan> CloudBackupManager::takePendingScan(quint64 requestId)
+{
+    const auto it = m_pendingScans.constFind(requestId);
+    if (it == m_pendingScans.cend())
+        return std::nullopt;
+    const PendingScan scan = *it;
+    m_pendingScans.erase(it);
+    return scan;
+}
 
-    m_backend->scanBackups();
+void CloudBackupManager::applyRetention(const QString &sourceId,
+                                        const QtCloudBackup::RetentionPolicy &policy,
+                                        const QList<BackupInfo> &backups)
+{
+    QList<BackupInfo> matching;
+    for (const auto &b : backups) {
+        if (b.sourceId == sourceId)
+            matching.append(b);
+    }
+
+    const auto result = QtCloudBackup::RetentionEvaluator::evaluate(matching, policy);
+    for (const QString &filename : result.toDelete)
+        m_backend->deleteBackup(filename);
 }
 
 void CloudBackupManager::handleReadFailed(const QString &filename, int error,

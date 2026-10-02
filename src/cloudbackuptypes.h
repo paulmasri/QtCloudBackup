@@ -103,6 +103,7 @@ enum class BackupError {
     DownloadError,
     DownloadTimeout,
     MigrationPartial,
+    ScanTimeout,
     UnknownError
 };
 Q_ENUM_NS(BackupError)

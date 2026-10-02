@@ -3,10 +3,12 @@
 #include "backupinfo.h"
 #include "retentionpolicy.h"
 
+#include <QHash>
 #include <QObject>
 #include <QVariantMap>
 #include <QtQml/qqmlregistration.h>
 #include <memory>
+#include <optional>
 
 class CloudBackupBackend;
 
@@ -135,7 +137,20 @@ signals:
                           int totalCount, int error, const QString &message);
 
 private:
+    struct PendingScan {
+        enum class Purpose { List, Prune };
+        Purpose purpose;
+        QString sourceId;                       // Prune only
+        QtCloudBackup::RetentionPolicy policy;  // Prune only
+    };
+
     void pruneBackups(const QString &sourceId);
+    void startScan(const PendingScan &scan);
+    // Removes and returns the scan for `requestId`, or nullopt if its result
+    // has already been handled.
+    std::optional<PendingScan> takePendingScan(quint64 requestId);
+    void applyRetention(const QString &sourceId, const QtCloudBackup::RetentionPolicy &policy,
+                        const QList<BackupInfo> &backups);
 
     void handleReadFailed(const QString &filename, int error, const QString &message);
 
@@ -148,4 +163,8 @@ private:
     QDateTime m_currentBackupTimestamp;
     QString m_pendingReadFilename; // set when auto-downloading prior to a read retry
     QList<OrphanedBackupInfo> m_orphanedBackups;
+    // Scans still awaiting a result, keyed by request ID. A result whose ID
+    // is not here is ignored.
+    QHash<quint64, PendingScan> m_pendingScans;
+    quint64 m_nextScanId = 0;
 };

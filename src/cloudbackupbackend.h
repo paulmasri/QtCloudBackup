@@ -63,7 +63,11 @@ public:
     virtual void writeBackup(const QString &filename, const QByteArray &data, const QJsonObject &meta) = 0;
     virtual void readBackup(const QString &filename) = 0;
     virtual void deleteBackup(const QString &filename) = 0;
-    virtual void scanBackups() = 0;
+    // Async. Every call emits exactly one of `scanCompleted` or `scanFailed`,
+    // carrying the same `requestId`. An existing but empty backup directory
+    // gives `scanCompleted` with an empty list; a missing or unreadable one
+    // gives `scanFailed`.
+    virtual void scanBackups(quint64 requestId) = 0;
     // Lightweight sibling of scanBackups(): enumerate the backup directory and
     // parse filenames only. Never opens a .meta sidecar and never triggers
     // hydration of a cloud placeholder. Async; result delivered via
@@ -93,7 +97,8 @@ signals:
     void readCompleted(const QString &filename, const QByteArray &data, const QJsonObject &meta,
                        int error, const QString &message);
     void deleteCompleted(const QString &filename, int error, const QString &message);
-    void scanCompleted(const QList<BackupInfo> &backups);
+    void scanCompleted(quint64 requestId, const QList<BackupInfo> &backups);
+    void scanFailed(quint64 requestId, int error, const QString &message);
     void digestScanCompleted(const QList<BackupDigest> &digests);
     void downloadProgress(const QString &filename, qint64 received, qint64 total);
     void downloadCompleted(const QString &filename, int error, const QString &message);
