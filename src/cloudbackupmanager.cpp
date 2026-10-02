@@ -50,14 +50,18 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
 
     connect(m_backend.get(), &CloudBackupBackend::writeCompleted, this,
             [this](const QString &filename, int error, const QString &message) {
+                const bool succeeded = (error == int(QtCloudBackup::BackupError::NoError));
+                // Start the prune before backupIoBusy goes false, so that
+                // `(backupIoBusy || pruning)` stays true from the start of the
+                // write until its prune has finished.
+                if (succeeded)
+                    pruneBackups(m_currentBackupSourceId);
                 m_backupIoBusy = false;
                 emit backupIoBusyChanged();
-                if (error == int(QtCloudBackup::BackupError::NoError)) {
+                if (succeeded)
                     emit backupSucceeded(filename, m_currentBackupTimestamp);
-                    pruneBackups(m_currentBackupSourceId);
-                } else {
+                else
                     emit backupFailed(error, message);
-                }
             });
 
     connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
@@ -78,9 +82,11 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
                     return;
                 if (scan->purpose == PendingScan::Purpose::List)
                     emit backupsListFailed(error, message);
-                else
+                else {
                     qCWarning(managerLog, "prune scan failed (sourceId=%s): %s",
                               qPrintable(scan->sourceId), qPrintable(message));
+                    endPrune();
+                }
             });
 
     connect(m_backend.get(), &CloudBackupBackend::digestScanCompleted, this,
@@ -105,6 +111,20 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
                     emit deleteSucceeded(filename);
                 else
                     emit deleteFailed(filename, error, message);
+
+                // Match the filename to its prune only after emitting the
+                // delete signal. A consumer reacting to pruningChanged then
+                // already has every delete result. A delete started by
+                // deleteBackup() matches no prune.
+                for (auto it = m_pruneDeletes.begin(); it != m_pruneDeletes.end(); ++it) {
+                    if (!it->remove(filename))
+                        continue;
+                    if (it->isEmpty()) {
+                        m_pruneDeletes.erase(it);
+                        endPrune();
+                    }
+                    break;
+                }
             });
 
     connect(m_backend.get(), &CloudBackupBackend::downloadProgress, this,
@@ -200,6 +220,11 @@ bool CloudBackupManager::backupIoBusy() const
     return m_backupIoBusy;
 }
 
+bool CloudBackupManager::pruning() const
+{
+    return m_activePrunes > 0;
+}
+
 QtCloudBackup::RetentionPolicy CloudBackupManager::retentionPolicy() const
 {
     return m_retentionPolicy;
@@ -221,8 +246,11 @@ bool CloudBackupManager::hasOrphanedBackups() const
 void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray &data,
                                        const QVariantMap &metadata)
 {
-    if (m_backupIoBusy)
+    if (m_backupIoBusy) {
+        emit backupFailed(int(QtCloudBackup::BackupError::BackupIoBusy),
+                          tr("Another backup operation is in progress"));
         return;
+    }
 
     // Sanitize sourceId
     QString sanitized;
@@ -294,8 +322,11 @@ void CloudBackupManager::readBackup(const QString &filename)
                               tr("Invalid backup filename"));
         return;
     }
-    if (m_backupIoBusy)
+    if (m_backupIoBusy) {
+        emit backupReadFailed(filename, int(QtCloudBackup::BackupError::BackupIoBusy),
+                              tr("Another backup operation is in progress"));
         return;
+    }
 
     m_pendingReadFilename.clear();
     m_backupIoBusy = true;
@@ -337,6 +368,12 @@ void CloudBackupManager::prune(const QString &sourceId)
 {
     if (sourceId.isEmpty() || !m_backend)
         return;
+    if (m_backupIoBusy) {
+        qCDebug(managerLog,
+                "prune skipped while a backup is in progress (sourceId=%s)",
+                qPrintable(sourceId));
+        return;
+    }
     pruneBackups(sourceId);
 }
 
@@ -375,17 +412,7 @@ AccountId CloudBackupManager::makeAccountId(
 
 void CloudBackupManager::pruneBackups(const QString &sourceId)
 {
-    // Guard against re-entrancy from explicit prune() calls during an
-    // in-flight backup write. The post-write auto-trigger sets
-    // m_backupIoBusy=false before calling pruneBackups, so it
-    // passes this check.
-    if (m_backupIoBusy) {
-        qCDebug(managerLog,
-                "prune skipped while a backup is in progress (sourceId=%s)",
-                qPrintable(sourceId));
-        return;
-    }
-
+    beginPrune();
     startScan({ PendingScan::Purpose::Prune, sourceId, m_retentionPolicy });
 }
 
@@ -400,9 +427,11 @@ void CloudBackupManager::startScan(const PendingScan &scan)
         if (timedOut->purpose == PendingScan::Purpose::List)
             emit backupsListFailed(int(QtCloudBackup::BackupError::ScanTimeout),
                                    tr("Backup scan timed out"));
-        else
+        else {
             qCWarning(managerLog, "prune scan timed out (sourceId=%s)",
                       qPrintable(timedOut->sourceId));
+            endPrune();
+        }
     });
     m_backend->scanBackups(requestId);
 }
@@ -428,8 +457,28 @@ void CloudBackupManager::applyRetention(const QString &sourceId,
     }
 
     const auto result = QtCloudBackup::RetentionEvaluator::evaluate(matching, policy);
+    if (result.toDelete.isEmpty()) {
+        endPrune();
+        return;
+    }
+
+    // Record the filenames before starting any delete, so every
+    // deleteCompleted finds its set.
+    m_pruneDeletes.append(result.toDelete);
     for (const QString &filename : result.toDelete)
         m_backend->deleteBackup(filename);
+}
+
+void CloudBackupManager::beginPrune()
+{
+    if (m_activePrunes++ == 0)
+        emit pruningChanged();
+}
+
+void CloudBackupManager::endPrune()
+{
+    if (m_activePrunes > 0 && --m_activePrunes == 0)
+        emit pruningChanged();
 }
 
 void CloudBackupManager::handleReadFailed(const QString &filename, int error,

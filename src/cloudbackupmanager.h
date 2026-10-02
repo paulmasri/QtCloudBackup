@@ -4,6 +4,7 @@
 #include "retentionpolicy.h"
 
 #include <QHash>
+#include <QSet>
 #include <QObject>
 #include <QVariantMap>
 #include <QtQml/qqmlregistration.h>
@@ -22,6 +23,7 @@ class CloudBackupManager : public QObject {
     Q_PROPERTY(bool hasDetected READ hasDetected NOTIFY hasDetectedChanged)
     Q_PROPERTY(bool selecting READ selecting NOTIFY selectingChanged)
     Q_PROPERTY(bool backupIoBusy READ backupIoBusy NOTIFY backupIoBusyChanged)
+    Q_PROPERTY(bool pruning READ pruning NOTIFY pruningChanged)
     Q_PROPERTY(QtCloudBackup::RetentionPolicy retentionPolicy READ retentionPolicy WRITE setRetentionPolicy NOTIFY retentionPolicyChanged)
     Q_PROPERTY(bool hasOrphanedBackups READ hasOrphanedBackups NOTIFY hasOrphanedBackupsChanged)
 
@@ -41,6 +43,12 @@ public:
     // because a newer detection replaced it).
     bool selecting() const;
     bool backupIoBusy() const;
+    // True while any prune is still running. A prune finishes when its scan
+    // finds nothing to delete, when every file it deleted has reported back,
+    // or when its scan fails or times out. After a successful backup, this
+    // goes true before backupIoBusy goes false. So `(backupIoBusy || pruning)`
+    // stays true from the start of the write until its prune has finished.
+    bool pruning() const;
     QtCloudBackup::RetentionPolicy retentionPolicy() const;
     void setRetentionPolicy(const QtCloudBackup::RetentionPolicy &policy);
     bool hasOrphanedBackups() const;
@@ -69,6 +77,9 @@ public:
     // if no matching account is currently detected; otherwise the resolved
     // AccountId, suitable for passing straight to select().
     Q_INVOKABLE AccountId resolveAccount(const DurableAccountIdentity &identity) const;
+    // Emits no success or failure signal of its own, by design: whatever the
+    // outcome, the caller has nothing to do about it. `pruning` shows when it
+    // has finished. A refused call does nothing.
     Q_INVOKABLE void prune(const QString &sourceId);
     Q_INVOKABLE void checkForOrphanedBackups();
     Q_INVOKABLE void migrateOrphanedBackups();
@@ -112,6 +123,7 @@ signals:
     void hasDetectedChanged();
     void selectingChanged();
     void backupIoBusyChanged();
+    void pruningChanged();
     void retentionPolicyChanged();
     void hasOrphanedBackupsChanged();
 
@@ -151,6 +163,10 @@ private:
     std::optional<PendingScan> takePendingScan(quint64 requestId);
     void applyRetention(const QString &sourceId, const QtCloudBackup::RetentionPolicy &policy,
                         const QList<BackupInfo> &backups);
+    // The only places that change m_activePrunes. pruneBackups() calls
+    // beginPrune(), and every way a prune can finish calls endPrune() once.
+    void beginPrune();
+    void endPrune();
 
     void handleReadFailed(const QString &filename, int error, const QString &message);
 
@@ -158,6 +174,10 @@ private:
     bool m_hasDetected = false;
     int m_pendingSelects = 0;
     bool m_backupIoBusy = false;
+    int m_activePrunes = 0;
+    // One set per prune that has deletes outstanding, oldest first. Each
+    // holds the filenames that prune is still waiting to hear back about.
+    QList<QSet<QString>> m_pruneDeletes;
     QtCloudBackup::RetentionPolicy m_retentionPolicy = { .keepLast = 3 };
     QString m_currentBackupSourceId;
     QDateTime m_currentBackupTimestamp;

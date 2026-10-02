@@ -162,6 +162,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `hasDetected` | `bool` | `false` until the handlers for the first `accountsDetected` have run, then `true` for the lifetime of the manager. Detecting again never sets it back to `false`. See [Interpreting `Unknown`](#interpreting-unknown). |
 | `selecting` | `bool` | `true` while any `select()` call is still in progress. A call counts as finished when its result has been applied or discarded (for example, because a newer detection replaced it). See [Interpreting `Unknown`](#interpreting-unknown). |
 | `backupIoBusy` | `bool` | Whether the library is mid-IO with the storage backend (create or read path) |
+| `pruning` | `bool` | `true` from the moment a prune is due until it has finished. See [Knowing when a prune has finished](#knowing-when-a-prune-has-finished). |
 | `retentionPolicy` | `RetentionPolicy` | Configurable union-of-keeps retention (default: `{ keepLast = 3 }`). See [How pruning works](#how-pruning-works). |
 | `hasOrphanedBackups` | `bool` | Whether orphaned backups were found (see [Orphaned backup migration](#orphaned-backup-migration)) |
 
@@ -178,7 +179,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `detect()` | Stage 1: enumerate candidate accounts. No filesystem side effects. Result delivered via `accountsDetected`. See [Storage lifecycle](#storage-lifecycle). |
 | `select(id)` | Stage 2: activate the chosen account. `id` is the `AccountId` from a `DetectedAccount.id` (or the resolved id from `resolveAccount`). Creates the backup subdirectory; brings up platform machinery. Status delivered via `statusChanged`. Reentrant — switching does not migrate existing backups. |
 | `resolveAccount(identity)` | Maps a persisted `DurableAccountIdentity` to the current in-memory `AccountId`. Returns an `AccountId` whose `type == StorageType::None` if the account is no longer detected; otherwise the resolved `AccountId`, suitable for passing straight to `select()`. |
-| `prune(sourceId)` | Apply the current `retentionPolicy` to `sourceId` immediately. Useful after a policy change. No-op while a backup is in progress. |
+| `prune(sourceId)` | Starts a prune of `sourceId`'s backups under the current `retentionPolicy`. Useful after a policy change. While `backupIoBusy` is true, or if `sourceId` is empty, the call is refused: it emits no signal and `pruning` does not change. See [Knowing when a prune has finished](#knowing-when-a-prune-has-finished). |
 | `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
 | `makeRetentionPolicy(keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly)` | Factory for constructing a `RetentionPolicy` from QML — gadget value types can't be assembled via JS-object literals. See [QML usage example](#qml-usage-example). |
@@ -192,13 +193,13 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `accountsDetected(accounts)` | `detect()` complete; `accounts` is a `QList<DetectedAccount>`. May fire any time platform events trigger re-detection (e.g. iCloud sign-in change). |
 | `statusChanged(status, detail)` | Active target's status changed. Fires from `select()` completion, from `detect()`-driven invalidation (a previously-selected account is no longer Ready), and from platform-event-driven re-detection. See [Storage state can change at runtime](#storage-state-can-change-at-runtime). |
 | `backupSucceeded(filename, timestamp)` | Backup created |
-| `backupFailed(error, message)` | Backup creation failed (see BackupError enum) |
+| `backupFailed(error, message)` | Backup creation failed (see BackupError enum). For `InvalidArgument` and `BackupIoBusy` it is emitted synchronously, from inside `createBackup()`. |
 | `backupsListed(backups)` | `listBackups()` complete; `backups` is a `QList<BackupInfo>`. Scans the library starts for its own use, such as pruning, do not emit it. |
 | `backupsListFailed(error, message)` | `listBackups()` failed: the backup directory could not be read, or no account is selected (see BackupError enum) |
 | `backupDigestsListed(digests)` | Lightweight scan complete; `digests` is a `QList<BackupDigest>` (filename-derived `sourceId`/`timestamp`/`filename` only). |
 | `backupReadStarted(filename)` | `readBackup()` accepted; bytes have not yet arrived |
 | `backupReadCompleted(filename, data, metadata)` | Read succeeded; `data` is the backup payload, `metadata` is the recorded metadata map |
-| `backupReadFailed(filename, error, message)` | Read failed (see BackupError enum) |
+| `backupReadFailed(filename, error, message)` | Read failed (see BackupError enum). For `InvalidArgument` and `BackupIoBusy` it is emitted synchronously, from inside `readBackup()`, with no `backupReadStarted` before it. |
 | `downloadUpdated(filename, status, error, message)` | Download status update (see DownloadStatus, BackupError enums) |
 | `downloadProgressChanged(filename, bytesReceived, bytesTotal)` | Download progress (`bytesTotal == -1` means indeterminate). Also fires during `readBackup()`'s auto-download retry. |
 | `deleteSucceeded(filename)` / `deleteFailed(filename, error, message)` | Delete result (see BackupError enum) |
@@ -218,7 +219,11 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 
 **MigrationStatus**: `MigrationInProgress`, `MigrationSucceeded`, `MigrationFailed`
 
-**BackupError**: `NoError`, `InvalidArgument`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadError`, `DownloadTimeout`, `MigrationPartial`, `ScanTimeout`, `UnknownError`
+**BackupError**: `NoError`, `InvalidArgument`, `BackupIoBusy`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadError`, `DownloadTimeout`, `MigrationPartial`, `ScanTimeout`, `UnknownError`
+
+The integer values may change periodically. Compare against the names, not stored numbers.
+
+`BackupIoBusy` means `createBackup()` or `readBackup()` was called while `backupIoBusy` was true, so the call was refused. It never ends an operation that started: the backup or read already running still ends with its own success or failure signal. In a failure handler, treat `BackupIoBusy` as a refused call and leave the state of the running operation alone. A refused `readBackup()` emits no `backupReadStarted` before its failure.
 
 ### Value types
 
@@ -579,6 +584,25 @@ When re-detection finds that the previously-selected account is no longer `Ready
 QtCloudBackup uses the **union-of-keeps** retention model familiar from Borg, restic, sanoid, rsnapshot, and (in hardcoded form) Apple Time Machine. A `RetentionPolicy` is a flat collection of five independent keep rules; the set of backups *kept* is the union of every rule's selection, the set *pruned* is everything else. Rules are order-agnostic — `keepDaily 7 + keepWeekly 4` produces the same result as `keepWeekly 4 + keepDaily 7` — and a single backup can satisfy multiple rules (it's kept once).
 
 Pruning runs automatically after each successful `createBackup()` against the just-written `sourceId`, and can be triggered manually via `prune(sourceId)`. The library never persists the policy itself — the consuming app owns persistence (typically `QSettings`) and sets the policy on the manager at startup.
+
+### Knowing when a prune has finished
+
+The `pruning` property is `true` while any prune is running:
+- `prune()` sets `pruning` to `true` before it returns, unless the call is refused. A call is refused only when `sourceId` is empty or `backupIoBusy` is true, so check both before calling to know whether the call will be accepted. Checking `pruning` afterwards doesn't tell you, because another prune may already have set it to `true`;
+- two prunes can run at once, for example a `prune()` call made while the automatic prune after a backup is still running. `pruning` stays `true` until both have finished. When it goes `false`, every prune has finished, not just the one you started;
+- after a successful backup, `pruning` goes `true` before `backupIoBusy` goes `false` and before `backupSucceeded` is emitted. So `(backupIoBusy || pruning)` stays `true` from the start of the write until its prune has finished;
+- `pruning` goes `false` once the prune's scan finds nothing to delete, or once every file it deleted has a `deleteSucceeded` or `deleteFailed`. It also goes `false` if the scan fails, or gets no result within 10 s.
+
+A list read while `pruning` is `true` can include a backup that is about to be deleted. A consumer that shows backups for the user to pick should wait for `pruning` to go `false`, then call `listBackups()` again.
+
+### A prune has no success or failure signal
+
+`createBackup()` and `readBackup()` each end with their own success or failure signal. A prune deliberately doesn't. A prune is housekeeping: whatever its outcome, the consumer has nothing to do about it. So `pruning` going `false` is the only sign that it has finished, and it doesn't say how it went:
+- each file a prune deletes gets reported through `deleteSucceeded` or `deleteFailed`, the same signals that `deleteBackup()` uses. A consumer can't tell the prune's deletes from its own;
+- if the prune's scan fails or times out, the prune ends without deleting anything. The library logs a warning under the `qtcloudbackup.manager` logging category, and emits no signal;
+- when two prunes overlap, `pruning` only goes `false` once both have finished. A consumer can't tell when either one finished on its own.
+
+None of these needs handling. A prune that fails does no harm: the backups it would have deleted stay until the next prune, which runs after the next successful backup or the next accepted `prune()` call.
 
 ### Worked examples
 
