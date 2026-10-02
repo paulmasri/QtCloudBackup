@@ -223,7 +223,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 
 The integer values may change periodically. Compare against the names, not stored numbers.
 
-`BackupIoBusy` means `createBackup()` or `readBackup()` was called while `backupIoBusy` was true, so the call was refused. It refers to the refused call, not to the operation already in flight. That operation still ends with its own success or failure signal. `backupFailed` carries no filename, so the two can only be told apart by order. `backupReadFailed` does carry one. But if `readBackup()` is called twice for the same filename, the `BackupIoBusy` failure for the second call carries the same filename while the first read is still running.
+`BackupIoBusy` means `createBackup()` or `readBackup()` was called while `backupIoBusy` was true, so the call was refused. It never ends an operation that started: the backup or read already running still ends with its own success or failure signal. In a failure handler, treat `BackupIoBusy` as a refused call and leave the state of the running operation alone. A refused `readBackup()` emits no `backupReadStarted` before its failure.
 
 ### Value types
 
