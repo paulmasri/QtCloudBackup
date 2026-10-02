@@ -179,7 +179,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `detect()` | Stage 1: enumerate candidate accounts. No filesystem side effects. Result delivered via `accountsDetected`. See [Storage lifecycle](#storage-lifecycle). |
 | `select(id)` | Stage 2: activate the chosen account. `id` is the `AccountId` from a `DetectedAccount.id` (or the resolved id from `resolveAccount`). Creates the backup subdirectory; brings up platform machinery. Status delivered via `statusChanged`. Reentrant — switching does not migrate existing backups. |
 | `resolveAccount(identity)` | Maps a persisted `DurableAccountIdentity` to the current in-memory `AccountId`. Returns an `AccountId` whose `type == StorageType::None` if the account is no longer detected; otherwise the resolved `AccountId`, suitable for passing straight to `select()`. |
-| `prune(sourceId)` | Apply the current `retentionPolicy` to `sourceId` immediately. Useful after a policy change. No-op while `backupIoBusy` is true; `pruning` does not change. |
+| `prune(sourceId)` | Starts a prune of `sourceId`'s backups under the current `retentionPolicy`. Useful after a policy change. While `backupIoBusy` is true, or if `sourceId` is empty, the call is refused: it emits no signal and `pruning` does not change. See [Knowing when a prune has finished](#knowing-when-a-prune-has-finished). |
 | `checkForOrphanedBackups()` | Scan lower-priority locations for orphans (see [Orphaned backup migration](#orphaned-backup-migration)) |
 | `migrateOrphanedBackups()` | Move detected orphans to the active backend |
 | `makeRetentionPolicy(keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly)` | Factory for constructing a `RetentionPolicy` from QML — gadget value types can't be assembled via JS-object literals. See [QML usage example](#qml-usage-example). |
@@ -588,7 +588,9 @@ Pruning runs automatically after each successful `createBackup()` against the ju
 ### Knowing when a prune has finished
 
 The `pruning` property is `true` while any prune is running:
-- after a successful backup, `pruning` goes `true` before `backupIoBusy` goes `false` and before `backupSucceeded` is emitted. So `backupIoBusy || pruning` stays `true` from the start of the write until its prune has finished;
+- `prune()` sets `pruning` to `true` before it returns, unless the call is refused. A call is refused only when `sourceId` is empty or `backupIoBusy` is true, so check both before calling to know whether the call will be accepted. Checking `pruning` afterwards doesn't tell you, because another prune may already have set it to `true`;
+- two prunes can run at once, for example a `prune()` call made while the automatic prune after a backup is still running. `pruning` stays `true` until both have finished. When it goes `false`, every prune has finished, not just the one you started;
+- after a successful backup, `pruning` goes `true` before `backupIoBusy` goes `false` and before `backupSucceeded` is emitted. So `(backupIoBusy || pruning)` stays `true` from the start of the write until its prune has finished;
 - `pruning` goes `false` once the prune's scan finds nothing to delete, or once every file it deleted has a `deleteSucceeded` or `deleteFailed`. It also goes `false` if the scan fails, or gets no result within 10 s.
 
 A list read while `pruning` is `true` can include a backup that is about to be deleted. A consumer that shows backups for the user to pick should wait for `pruning` to go `false`, then call `listBackups()` again.
