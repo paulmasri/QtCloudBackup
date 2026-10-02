@@ -170,7 +170,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | Method | Description |
 |--------|-------------|
 | `createBackup(sourceId, data, metadata)` | Write a backup with optional metadata map |
-| `listBackups()` | Scan for all backups (full metadata) and emit `backupsListed` |
+| `listBackups()` | Scan for all backups (full metadata). Every call ends with exactly one of `backupsListed` or `backupsListFailed`. |
 | `listBackupDigests()` | Lightweight scan — emit `backupDigestsListed` with `sourceId`/`timestamp`/`filename` derived from filenames alone. No `.meta` sidecar reads, no cloud-placeholder hydration. See [Lightweight digest listing](#lightweight-digest-listing). |
 | `readBackup(filename)` | Fetch a backup's bytes and metadata; auto-downloads if cloud-only |
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
@@ -193,7 +193,8 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `statusChanged(status, detail)` | Active target's status changed. Fires from `select()` completion, from `detect()`-driven invalidation (a previously-selected account is no longer Ready), and from platform-event-driven re-detection. See [Storage state can change at runtime](#storage-state-can-change-at-runtime). |
 | `backupSucceeded(filename, timestamp)` | Backup created |
 | `backupFailed(error, message)` | Backup creation failed (see BackupError enum) |
-| `backupsListed(backups)` | Scan complete; `backups` is a `QList<BackupInfo>` |
+| `backupsListed(backups)` | `listBackups()` complete; `backups` is a `QList<BackupInfo>`. Scans the library starts for its own use, such as pruning, do not emit it. |
+| `backupsListFailed(error, message)` | `listBackups()` failed: the backup directory could not be read, or no account is selected (see BackupError enum) |
 | `backupDigestsListed(digests)` | Lightweight scan complete; `digests` is a `QList<BackupDigest>` (filename-derived `sourceId`/`timestamp`/`filename` only). |
 | `backupReadStarted(filename)` | `readBackup()` accepted; bytes have not yet arrived |
 | `backupReadCompleted(filename, data, metadata)` | Read succeeded; `data` is the backup payload, `metadata` is the recorded metadata map |

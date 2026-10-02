@@ -447,11 +447,22 @@ void WindowsOneDriveBackend::deleteBackup(const QString &filename)
     });
 }
 
-void WindowsOneDriveBackend::scanBackups()
+void WindowsOneDriveBackend::scanBackups(quint64 requestId)
 {
     QString dir = backupDir();
     QPointer<WindowsOneDriveBackend> self(this);
-    (void)QtConcurrent::run([self, dir] {
+    (void)QtConcurrent::run([self, dir, requestId] {
+        const QFileInfo dirInfo(dir);
+        if (dir.isEmpty() || !dirInfo.isDir() || !dirInfo.isReadable()) {
+            const QString msg = WindowsOneDriveBackend::tr("Backup directory is not available");
+            QMetaObject::invokeMethod(qApp, [self, requestId, msg] {
+                if (!self) return;
+                emit self->scanFailed(requestId,
+                                      int(QtCloudBackup::BackupError::IOError), msg);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
         QDir d(dir);
         QStringList entries = d.entryList({QStringLiteral("qtcloudbackup_*.bak")},
                                           QDir::Files, QDir::Name);
@@ -509,9 +520,9 @@ void WindowsOneDriveBackend::scanBackups()
             backups.append(info);
         }
 
-        QMetaObject::invokeMethod(qApp, [self, backups] {
+        QMetaObject::invokeMethod(qApp, [self, requestId, backups] {
             if (!self) return;
-            emit self->scanCompleted(backups);
+            emit self->scanCompleted(requestId, backups);
         }, Qt::QueuedConnection);
     });
 }

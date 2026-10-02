@@ -487,13 +487,24 @@ void AppleICloudBackend::deleteBackup(const QString &filename)
     });
 }
 
-void AppleICloudBackend::scanBackups()
+void AppleICloudBackend::scanBackups(quint64 requestId)
 {
     QString dir = backupDir();
     QPointer<AppleICloudBackend> self(this);
     auto queryGuard = m_queryGuard; // shared_ptr copy for thread safety
-    (void)QtConcurrent::run([self, dir, queryGuard] {
+    (void)QtConcurrent::run([self, dir, queryGuard, requestId] {
         @autoreleasepool {
+            const QFileInfo dirInfo(dir);
+            if (dir.isEmpty() || !dirInfo.isDir() || !dirInfo.isReadable()) {
+                const QString msg = AppleICloudBackend::tr("Backup directory is not available");
+                QMetaObject::invokeMethod(qApp, [self, requestId, msg] {
+                    if (!self) return;
+                    emit self->scanFailed(requestId,
+                                          int(QtCloudBackup::BackupError::IOError), msg);
+                }, Qt::QueuedConnection);
+                return;
+            }
+
             QList<BackupInfo> backups;
 
             // Use QDir for local files
@@ -635,9 +646,9 @@ void AppleICloudBackend::scanBackups()
                 }
             }
 
-            QMetaObject::invokeMethod(qApp, [self, backups] {
+            QMetaObject::invokeMethod(qApp, [self, requestId, backups] {
                 if (!self) return;
-                emit self->scanCompleted(backups);
+                emit self->scanCompleted(requestId, backups);
             }, Qt::QueuedConnection);
         }
     });

@@ -17,7 +17,7 @@ public:
     void writeBackup(const QString &filename, const QByteArray &data, const QJsonObject &meta) override;
     void readBackup(const QString &filename) override;
     void deleteBackup(const QString &filename) override;
-    void scanBackups() override;
+    void scanBackups(quint64 requestId) override;
     void scanBackupDigests() override;
     void triggerDownload(const QString &filename) override;
     void scanOrphanedBackups() override;
