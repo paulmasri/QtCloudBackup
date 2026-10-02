@@ -96,6 +96,7 @@ Q_ENUM_NS(MigrationStatus)
 enum class BackupError {
     NoError,
     InvalidArgument,
+    BackupIoBusy,
     IOError,
     MetadataIOError,
     CoordinationFailed,

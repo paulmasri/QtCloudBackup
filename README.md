@@ -192,13 +192,13 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `accountsDetected(accounts)` | `detect()` complete; `accounts` is a `QList<DetectedAccount>`. May fire any time platform events trigger re-detection (e.g. iCloud sign-in change). |
 | `statusChanged(status, detail)` | Active target's status changed. Fires from `select()` completion, from `detect()`-driven invalidation (a previously-selected account is no longer Ready), and from platform-event-driven re-detection. See [Storage state can change at runtime](#storage-state-can-change-at-runtime). |
 | `backupSucceeded(filename, timestamp)` | Backup created |
-| `backupFailed(error, message)` | Backup creation failed (see BackupError enum) |
+| `backupFailed(error, message)` | Backup creation failed (see BackupError enum). For `InvalidArgument` and `BackupIoBusy` it is emitted synchronously, from inside `createBackup()`. |
 | `backupsListed(backups)` | `listBackups()` complete; `backups` is a `QList<BackupInfo>`. Scans the library starts for its own use, such as pruning, do not emit it. |
 | `backupsListFailed(error, message)` | `listBackups()` failed: the backup directory could not be read, or no account is selected (see BackupError enum) |
 | `backupDigestsListed(digests)` | Lightweight scan complete; `digests` is a `QList<BackupDigest>` (filename-derived `sourceId`/`timestamp`/`filename` only). |
 | `backupReadStarted(filename)` | `readBackup()` accepted; bytes have not yet arrived |
 | `backupReadCompleted(filename, data, metadata)` | Read succeeded; `data` is the backup payload, `metadata` is the recorded metadata map |
-| `backupReadFailed(filename, error, message)` | Read failed (see BackupError enum) |
+| `backupReadFailed(filename, error, message)` | Read failed (see BackupError enum). For `InvalidArgument` and `BackupIoBusy` it is emitted synchronously, from inside `readBackup()`, with no `backupReadStarted` before it. |
 | `downloadUpdated(filename, status, error, message)` | Download status update (see DownloadStatus, BackupError enums) |
 | `downloadProgressChanged(filename, bytesReceived, bytesTotal)` | Download progress (`bytesTotal == -1` means indeterminate). Also fires during `readBackup()`'s auto-download retry. |
 | `deleteSucceeded(filename)` / `deleteFailed(filename, error, message)` | Delete result (see BackupError enum) |
@@ -218,7 +218,11 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 
 **MigrationStatus**: `MigrationInProgress`, `MigrationSucceeded`, `MigrationFailed`
 
-**BackupError**: `NoError`, `InvalidArgument`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadError`, `DownloadTimeout`, `MigrationPartial`, `ScanTimeout`, `UnknownError`
+**BackupError**: `NoError`, `InvalidArgument`, `BackupIoBusy`, `IOError`, `MetadataIOError`, `CoordinationFailed`, `FileNotLocal`, `DownloadError`, `DownloadTimeout`, `MigrationPartial`, `ScanTimeout`, `UnknownError`
+
+The integer values from `IOError` onwards changed in 0.13.0. Compare against the names, not stored numbers.
+
+`BackupIoBusy` means `createBackup()` or `readBackup()` was called while `backupIoBusy` was true, so the call was refused. It refers to the refused call, not to the operation already in flight. That operation still ends with its own success or failure signal. `backupFailed` carries no filename, so the two can only be told apart by order. `backupReadFailed` does carry one. But if `readBackup()` is called twice for the same filename, the `BackupIoBusy` failure for the second call carries the same filename while the first read is still running.
 
 ### Value types
 

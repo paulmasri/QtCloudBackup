@@ -221,8 +221,11 @@ bool CloudBackupManager::hasOrphanedBackups() const
 void CloudBackupManager::createBackup(const QString &sourceId, const QByteArray &data,
                                        const QVariantMap &metadata)
 {
-    if (m_backupIoBusy)
+    if (m_backupIoBusy) {
+        emit backupFailed(int(QtCloudBackup::BackupError::BackupIoBusy),
+                          tr("Another backup operation is in progress"));
         return;
+    }
 
     // Sanitize sourceId
     QString sanitized;
@@ -294,8 +297,11 @@ void CloudBackupManager::readBackup(const QString &filename)
                               tr("Invalid backup filename"));
         return;
     }
-    if (m_backupIoBusy)
+    if (m_backupIoBusy) {
+        emit backupReadFailed(filename, int(QtCloudBackup::BackupError::BackupIoBusy),
+                              tr("Another backup operation is in progress"));
         return;
+    }
 
     m_pendingReadFilename.clear();
     m_backupIoBusy = true;
