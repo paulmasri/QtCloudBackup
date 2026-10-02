@@ -51,18 +51,17 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     connect(m_backend.get(), &CloudBackupBackend::writeCompleted, this,
             [this](const QString &filename, int error, const QString &message) {
                 const bool succeeded = (error == int(QtCloudBackup::BackupError::NoError));
-                // Count the prune before backupIoBusy goes false, so that
-                // backupIoBusy || pruning stays true from the write to its prune.
+                // Start the prune before backupIoBusy goes false, so that
+                // `(backupIoBusy || pruning)` stays true from the start of the
+                // write until its prune has finished.
                 if (succeeded)
-                    beginPrune();
+                    pruneBackups(m_currentBackupSourceId);
                 m_backupIoBusy = false;
                 emit backupIoBusyChanged();
-                if (succeeded) {
+                if (succeeded)
                     emit backupSucceeded(filename, m_currentBackupTimestamp);
-                    pruneBackups(m_currentBackupSourceId);
-                } else {
+                else
                     emit backupFailed(error, message);
-                }
             });
 
     connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
@@ -113,8 +112,10 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
                 else
                     emit deleteFailed(filename, error, message);
 
-                // Emitted after the delete signal, so a consumer reacting to
-                // pruningChanged already has every delete result.
+                // Match the filename to its prune only after emitting the
+                // delete signal. A consumer reacting to pruningChanged then
+                // already has every delete result. A delete started by
+                // deleteBackup() matches no prune.
                 for (auto it = m_pruneDeletes.begin(); it != m_pruneDeletes.end(); ++it) {
                     if (!it->remove(filename))
                         continue;
@@ -373,7 +374,6 @@ void CloudBackupManager::prune(const QString &sourceId)
                 qPrintable(sourceId));
         return;
     }
-    beginPrune();
     pruneBackups(sourceId);
 }
 
@@ -412,18 +412,7 @@ AccountId CloudBackupManager::makeAccountId(
 
 void CloudBackupManager::pruneBackups(const QString &sourceId)
 {
-    // The caller has already counted this prune with beginPrune(). After a
-    // write, backupIoBusy can be true again here if a backupIoBusyChanged or
-    // backupSucceeded handler started a new backup or read. The prune is
-    // skipped in that case.
-    if (m_backupIoBusy) {
-        qCDebug(managerLog,
-                "prune skipped while a backup is in progress (sourceId=%s)",
-                qPrintable(sourceId));
-        endPrune();
-        return;
-    }
-
+    beginPrune();
     startScan({ PendingScan::Purpose::Prune, sourceId, m_retentionPolicy });
 }
 

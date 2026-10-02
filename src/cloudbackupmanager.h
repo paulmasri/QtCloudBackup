@@ -45,9 +45,9 @@ public:
     bool backupIoBusy() const;
     // True while any prune is still running. A prune finishes when its scan
     // finds nothing to delete, when every file it deleted has reported back,
-    // or when its scan fails or times out. After a successful backup this
-    // goes true before backupIoBusy goes false, so the two never both read
-    // false between the write and its prune.
+    // or when its scan fails or times out. After a successful backup, this
+    // goes true before backupIoBusy goes false. So `(backupIoBusy || pruning)`
+    // stays true from the start of the write until its prune has finished.
     bool pruning() const;
     QtCloudBackup::RetentionPolicy retentionPolicy() const;
     void setRetentionPolicy(const QtCloudBackup::RetentionPolicy &policy);
@@ -160,8 +160,8 @@ private:
     std::optional<PendingScan> takePendingScan(quint64 requestId);
     void applyRetention(const QString &sourceId, const QtCloudBackup::RetentionPolicy &policy,
                         const QList<BackupInfo> &backups);
-    // The only places that change m_activePrunes. Every beginPrune() is
-    // matched by exactly one endPrune().
+    // The only places that change m_activePrunes. pruneBackups() calls
+    // beginPrune(), and every way a prune can finish calls endPrune() once.
     void beginPrune();
     void endPrune();
 
