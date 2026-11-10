@@ -171,7 +171,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | Method | Description |
 |--------|-------------|
 | `createBackup(sourceId, data, metadata)` | Write a backup with optional metadata map |
-| `listBackups()` | Scan for all backups (full metadata). Every call ends with exactly one of `backupsListed` or `backupsListFailed`. If no result arrives within 10 s, it ends with `backupsListFailed(ScanTimeout, …)`, and a later result is discarded. |
+| `listBackups()` | Scan for all backups (full metadata). Every call ends with exactly one of `backupsListed` or `backupsListFailed`. If no result arrives within 10 s, it ends with `backupsListFailed(ScanTimeout, …)`, and a later result is discarded. A timeout logs a warning under the `qtcloudbackup.manager` logging category. |
 | `listBackupDigests()` | Lightweight scan — emit `backupDigestsListed` with `sourceId`/`timestamp`/`filename` derived from filenames alone. No `.meta` sidecar reads, no cloud-placeholder hydration. See [Lightweight digest listing](#lightweight-digest-listing). |
 | `readBackup(filename)` | Fetch a backup's bytes and metadata; auto-downloads if cloud-only |
 | `requestDownload(filename)` | Trigger hydration of a cloud-only file |
@@ -726,6 +726,8 @@ Whenever `metaDownloadState != Local`, the user-supplied `metadata` map is empty
 Windows has no equivalent. The only hydration entry point (`CfHydratePlaceholder`) is part of the Cloud Sync Engines provider API, intended for sync-engine implementers (OneDrive itself), not for code that *uses* OneDrive. Without a kick-off, skip-and-mark on Windows would create the very retention-correctness problem that the Apple kick-off prevents — and the obvious workaround (read the file ourselves in a background thread) reintroduces the stuck-thread / pool-pollution risks that the skip was designed to avoid. So Windows takes the opposite trade: the scanner always opens. First-scan latency on a new PC (where every `.meta` may be a placeholder) is paid up-front; subsequent scans are fast because each row is now `Local`. Per-file cost is small enough (~0.3s measured against a real OneDrive) that linear scaling is acceptable.
 
 The practical UX consequence: on Apple, the backup list refreshes instantly and rows fill in their metadata over the next few seconds as `bird` services the requests. On Windows, the first refresh after a fresh install may take several seconds while the OS hydrates the sidecars; subsequent refreshes are instant. Consumers don't need different code paths — `metaDownloadState != Local` means "show as syncing" everywhere — but the *frequency* of seeing that state differs.
+
+To find out why a `.meta` stays `!= Local` on Apple, enable debug output for the `qtcloudbackup.apple` logging category. Each scan then logs every file in the backup folder with its iCloud download status, each backup's `downloadState` and `metaDownloadState`, and each download request with its result. A scan logs only when its lines differ from the last scan logged, so an app that rescans often doesn't repeat the same lines.
 
 Retention treats `metaDownloadState != Local` as **present but unconfirmed**:
 
