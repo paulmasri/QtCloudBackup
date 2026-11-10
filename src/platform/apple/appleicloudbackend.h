@@ -56,5 +56,7 @@ private:
     // the current state with an outdated result.
     int m_detectionGeneration = 0;
     std::shared_ptr<AppleQueryGuard> m_queryGuard = std::make_shared<AppleQueryGuard>();
+    // Debug lines of the last scan logged, so an unchanged rescan logs nothing.
+    QStringList m_lastScanLog;
     void *m_notificationObserver = nullptr; // id for NSUbiquityIdentityDidChangeNotification
 };

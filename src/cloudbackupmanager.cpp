@@ -67,8 +67,10 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     connect(m_backend.get(), &CloudBackupBackend::scanCompleted, this,
             [this](quint64 requestId, const QList<BackupInfo> &backups) {
                 const auto scan = takePendingScan(requestId);
-                if (!scan)
+                if (!scan) {
+                    logLateScanResult(requestId);
                     return;
+                }
                 if (scan->purpose == PendingScan::Purpose::List)
                     emit backupsListed(backups);
                 else
@@ -78,8 +80,10 @@ CloudBackupManager::CloudBackupManager(QObject *parent)
     connect(m_backend.get(), &CloudBackupBackend::scanFailed, this,
             [this](quint64 requestId, int error, const QString &message) {
                 const auto scan = takePendingScan(requestId);
-                if (!scan)
+                if (!scan) {
+                    logLateScanResult(requestId);
                     return;
+                }
                 if (scan->purpose == PendingScan::Purpose::List)
                     emit backupsListFailed(error, message);
                 else {
@@ -424,10 +428,11 @@ void CloudBackupManager::startScan(const PendingScan &scan)
         const auto timedOut = takePendingScan(requestId);
         if (!timedOut)
             return;
-        if (timedOut->purpose == PendingScan::Purpose::List)
+        if (timedOut->purpose == PendingScan::Purpose::List) {
+            qCWarning(managerLog, "list scan timed out");
             emit backupsListFailed(int(QtCloudBackup::BackupError::ScanTimeout),
                                    tr("Backup scan timed out"));
-        else {
+        } else {
             qCWarning(managerLog, "prune scan timed out (sourceId=%s)",
                       qPrintable(timedOut->sourceId));
             endPrune();
@@ -444,6 +449,14 @@ std::optional<CloudBackupManager::PendingScan> CloudBackupManager::takePendingSc
     const PendingScan scan = *it;
     m_pendingScans.erase(it);
     return scan;
+}
+
+void CloudBackupManager::logLateScanResult(quint64 requestId)
+{
+    // A pending scan is taken exactly once, by its result or by its timer, so
+    // a result with no pending scan arrived after the timer had already fired.
+    qCInfo(managerLog, "scan %llu finished after its timeout; result discarded",
+           static_cast<unsigned long long>(requestId));
 }
 
 void CloudBackupManager::applyRetention(const QString &sourceId,
