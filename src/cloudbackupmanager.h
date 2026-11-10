@@ -161,6 +161,7 @@ private:
     // Removes and returns the scan for `requestId`, or nullopt if its result
     // has already been handled.
     std::optional<PendingScan> takePendingScan(quint64 requestId);
+    void logLateScanResult(quint64 requestId);
     void applyRetention(const QString &sourceId, const QtCloudBackup::RetentionPolicy &policy,
                         const QList<BackupInfo> &backups);
     // The only places that change m_activePrunes. pruneBackups() calls
