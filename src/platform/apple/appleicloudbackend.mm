@@ -57,6 +57,47 @@ static QString describeState(QtCloudBackup::DownloadState state)
         QMetaEnum::fromType<QtCloudBackup::DownloadState>().valueToKey(int(state)));
 }
 
+// Read a local .meta sidecar (bounded) into info, setting metaDownloadState to
+// Local, or to Error if the file can't be opened or its JSON doesn't parse.
+static void readMetaFile(const QString &metaPath, BackupInfo &info)
+{
+    QFile metaFile(metaPath);
+    if (!metaFile.open(QIODevice::ReadOnly)) {
+        info.metaDownloadState = QtCloudBackup::DownloadState::Error;
+        return;
+    }
+    QJsonParseError parseError;
+    const QJsonObject meta =
+        QJsonDocument::fromJson(metaFile.read(MaxMetaFileSize), &parseError).object();
+    if (parseError.error != QJsonParseError::NoError) {
+        info.metaDownloadState = QtCloudBackup::DownloadState::Error;
+        return;
+    }
+    info.metaDownloadState = QtCloudBackup::DownloadState::Local;
+    info.sourceId = meta[QStringLiteral("sourceId")].toString();
+    info.timestamp = QDateTime::fromString(meta[QStringLiteral("timestamp")].toString(),
+                                           Qt::ISODateWithMs);
+    info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
+}
+
+// Fire-and-forget background hydration of a .meta sidecar, so a subsequent
+// scan finds it local. Without this, evicted .meta files would stay
+// perpetually cloud-only and their .bak would be permanently excluded from
+// prune candidates.
+static void requestMetaDownload(NSURL *metaUrl, const QString &metaName, bool logScan,
+                                QStringList &scanLog)
+{
+    NSError *downloadError = nil;
+    const BOOL requested = [[NSFileManager defaultManager]
+        startDownloadingUbiquitousItemAtURL:metaUrl
+                                      error:&downloadError];
+    if (logScan) {
+        scanLog << QStringLiteral("requested download: %1 ok=%2 error=%3")
+                       .arg(metaName, requested ? QStringLiteral("yes") : QStringLiteral("no"),
+                            describeError(downloadError));
+    }
+}
+
 std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 {
     return std::make_unique<AppleICloudBackend>();
@@ -622,42 +663,10 @@ void AppleICloudBackend::scanBackups(quint64 requestId)
                     info.metaDownloadState = QtCloudBackup::DownloadState::CloudOnly;
                 }
 
-                if (metaLocal) {
-                    QFile metaFile(metaPath);
-                    if (metaFile.open(QIODevice::ReadOnly)) {
-                        QJsonParseError parseError;
-                        QJsonObject meta = QJsonDocument::fromJson(
-                            metaFile.read(MaxMetaFileSize), &parseError).object();
-                        if (parseError.error != QJsonParseError::NoError) {
-                            info.metaDownloadState = QtCloudBackup::DownloadState::Error;
-                        } else {
-                            info.sourceId = meta[QStringLiteral("sourceId")].toString();
-                            info.timestamp = QDateTime::fromString(
-                                meta[QStringLiteral("timestamp")].toString(), Qt::ISODateWithMs);
-                            info.metadata = meta[QStringLiteral("metadata")].toObject().toVariantMap();
-                        }
-                    } else {
-                        // File exists per the status probe but open() failed
-                        // (permissions, IO).
-                        info.metaDownloadState = QtCloudBackup::DownloadState::Error;
-                    }
-                } else {
-                    // Fire-and-forget background hydration so a subsequent
-                    // scan finds the sidecar local. Without this, evicted
-                    // .meta files would stay perpetually cloud-only and
-                    // their .bak would be permanently excluded from prune
-                    // candidates (retention-correctness corollary).
-                    NSError *downloadError = nil;
-                    const BOOL requested = [[NSFileManager defaultManager]
-                        startDownloadingUbiquitousItemAtURL:metaUrl
-                                                      error:&downloadError];
-                    if (logScan) {
-                        scanLog << QStringLiteral("requested download: %1 ok=%2 error=%3")
-                                       .arg(metaName,
-                                            requested ? QStringLiteral("yes") : QStringLiteral("no"),
-                                            describeError(downloadError));
-                    }
-                }
+                if (metaLocal)
+                    readMetaFile(metaPath, info);
+                else
+                    requestMetaDownload(metaUrl, metaName, logScan, scanLog);
 
                 // Fallback: parse filename (always needed when .meta is
                 // missing, and a safety net when .meta is malformed)
