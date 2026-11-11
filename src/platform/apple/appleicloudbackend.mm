@@ -98,6 +98,44 @@ static void requestMetaDownload(NSURL *metaUrl, const QString &metaName, bool lo
     }
 }
 
+// Resolve a backup's .meta sidecar into info: read it if it's local, and
+// request its download otherwise. noFileState is reported when nothing exists
+// at the .meta's real path. Returns the download-status probe as text for the
+// scan log.
+static QString resolveMeta(const QString &dir, const QString &bakName,
+                           QtCloudBackup::DownloadState noFileState, BackupInfo &info,
+                           bool logScan, QStringList &scanLog)
+{
+    const QString metaName = backupStem(bakName) + QStringLiteral(".meta");
+    const QString metaPath = dir + QLatin1Char('/') + metaName;
+    NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
+
+    // Check for a file before probing, so a nil status only ever means a
+    // local file.
+    if (!QFileInfo::exists(metaPath)) {
+        info.metaDownloadState = noFileState;
+        requestMetaDownload(metaUrl, metaName, logScan, scanLog);
+        return QStringLiteral("no file");
+    }
+
+    // Skip open() unless the file is fully local — otherwise QFile::open()
+    // blocks on bird hydration, serialising the whole scan.
+    NSString *status = nil;
+    NSError *probeError = nil;
+    [metaUrl getResourceValue:&status
+                       forKey:NSURLUbiquitousItemDownloadingStatusKey
+                        error:&probeError];
+    if (!status || [status isEqual:NSURLUbiquitousItemDownloadingStatusCurrent]) {
+        readMetaFile(metaPath, info);
+    } else {
+        info.metaDownloadState = [status isEqual:NSURLUbiquitousItemDownloadingStatusDownloaded]
+            ? QtCloudBackup::DownloadState::Downloading
+            : QtCloudBackup::DownloadState::CloudOnly;
+        requestMetaDownload(metaUrl, metaName, logScan, scanLog);
+    }
+    return QStringLiteral("%1 error=%2").arg(describeStatus(status), describeError(probeError));
+}
+
 std::unique_ptr<CloudBackupBackend> createPlatformBackend()
 {
     return std::make_unique<AppleICloudBackend>();
@@ -686,6 +724,14 @@ void AppleICloudBackend::scanBackups(quint64 requestId)
 
             // Also query NSMetadataQuery for cloud-only files not in directory listing.
             // Access via shared queryGuard — safe even if the backend is destroyed.
+            // Only collect them while holding the lock, and handle their .meta
+            // files after releasing it, so file reads don't hold up the main
+            // thread's query notifications.
+            struct QueryOnlyBackup {
+                BackupInfo info;
+                QString percent;
+            };
+            QList<QueryOnlyBackup> queryOnly;
             {
                 QMutexLocker locker(&queryGuard->mutex);
                 if (queryGuard->query) {
@@ -709,41 +755,53 @@ void AppleICloudBackend::scanBackups(quint64 requestId)
                         if (localFilenames.contains(qName))
                             continue; // Already found via QDir
 
-                        BackupInfo info;
-                        info.filename = qName;
-                        info.downloadState = QtCloudBackup::DownloadState::CloudOnly;
-                        // Cloud-only: .bak isn't on local disk, so we haven't
-                        // read its .meta sidecar either. Mark .meta as
-                        // CloudOnly so retention excludes from prune
-                        // candidates until a subsequent scan after hydration.
-                        info.metaDownloadState = QtCloudBackup::DownloadState::CloudOnly;
+                        QueryOnlyBackup b;
+                        b.info.filename = qName;
+                        b.info.downloadState = QtCloudBackup::DownloadState::CloudOnly;
 
                         // Check download percentage
                         NSNumber *percent = [item valueForAttribute:
                             NSMetadataUbiquitousItemPercentDownloadedKey];
                         if (percent && percent.doubleValue > 0 && percent.doubleValue < 100) {
-                            info.downloadState = QtCloudBackup::DownloadState::Downloading;
+                            b.info.downloadState = QtCloudBackup::DownloadState::Downloading;
                         }
+                        b.percent = percent ? QString::number(percent.doubleValue)
+                                            : QStringLiteral("nil");
 
-                        // Parse filename for sourceId + timestamp
-                        parseBackupFilename(qName, info.sourceId, info.timestamp);
-
-                        if (logScan) {
-                            scanLog << QStringLiteral(
-                                           "backup: %1 via=NSMetadataQuery download=%2 meta=%3 percent=%4")
-                                           .arg(qName, describeState(info.downloadState),
-                                                describeState(info.metaDownloadState),
-                                                percent ? QString::number(percent.doubleValue)
-                                                        : QStringLiteral("nil"));
-                        }
-
-                        backups.append(info);
+                        queryOnly.append(b);
                     }
 
                     [query enableUpdates];
                 } else if (logScan) {
                     scanLog << QStringLiteral("metadata query not running");
                 }
+            }
+
+            for (QueryOnlyBackup &b : queryOnly) {
+                BackupInfo &info = b.info;
+
+                // The .bak isn't on local disk, but its .meta might be: read it
+                // once it's local, and request its download otherwise, so its
+                // metadata reaches the consumer and retention can consider it.
+                // A .meta with nothing at its real path is reported CloudOnly,
+                // since its .bak is itself in iCloud.
+                const QString metaProbe = resolveMeta(dir, info.filename,
+                                                      QtCloudBackup::DownloadState::CloudOnly,
+                                                      info, logScan, scanLog);
+
+                // Fallback: parse filename (needed until the .meta is read)
+                if (info.sourceId.isEmpty() || !info.timestamp.isValid())
+                    parseBackupFilename(info.filename, info.sourceId, info.timestamp);
+
+                if (logScan) {
+                    scanLog << QStringLiteral(
+                                   "backup: %1 via=NSMetadataQuery download=%2 meta=%3 metaProbe=%4 percent=%5")
+                                   .arg(info.filename, describeState(info.downloadState),
+                                        describeState(info.metaDownloadState), metaProbe,
+                                        b.percent);
+                }
+
+                backups.append(info);
             }
 
             QMetaObject::invokeMethod(qApp, [self, requestId, backups, scanLog] {
