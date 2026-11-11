@@ -669,42 +669,17 @@ void AppleICloudBackend::scanBackups(quint64 requestId)
                     info.downloadState = QtCloudBackup::DownloadState::Downloading;
                 }
 
-                // Try to read .meta sidecar (bounded). A missing or
-                // cloud-only .meta is not junk under cloud sync — it may be
-                // syncing, evicted, or a stale orphan. Surface honestly via
-                // metaDownloadState rather than blocking on hydration.
-                const QString metaName = backupStem(entry) + QStringLiteral(".meta");
-                QString metaPath = dir + QLatin1Char('/') + metaName;
-                NSURL *metaUrl = [NSURL fileURLWithPath:metaPath.toNSString()];
-
-                // Probe the .meta download status. Skip open() unless the
-                // file is fully local — otherwise QFile::open() blocks on
-                // bird hydration, serialising the whole scan.
-                NSString *metaStatus = nil;
-                NSError *metaProbeError = nil;
-                [metaUrl getResourceValue:&metaStatus
-                                   forKey:NSURLUbiquitousItemDownloadingStatusKey
-                                    error:&metaProbeError];
-                const bool metaLocal = !metaStatus ||
-                    [metaStatus isEqual:NSURLUbiquitousItemDownloadingStatusCurrent];
-
-                // Mirror NSURLUbiquitousItemDownloadingStatus onto the
-                // diagnostic metaDownloadState field. If the sidecar isn't
-                // on disk at all, that's Missing — distinct from CloudOnly.
-                if (!QFileInfo::exists(metaPath)) {
-                    info.metaDownloadState = QtCloudBackup::DownloadState::Missing;
-                } else if (metaLocal) {
-                    info.metaDownloadState = QtCloudBackup::DownloadState::Local;
-                } else if ([metaStatus isEqual:NSURLUbiquitousItemDownloadingStatusDownloaded]) {
-                    info.metaDownloadState = QtCloudBackup::DownloadState::Downloading;
-                } else {
-                    info.metaDownloadState = QtCloudBackup::DownloadState::CloudOnly;
-                }
-
-                if (metaLocal)
-                    readMetaFile(metaPath, info);
-                else
-                    requestMetaDownload(metaUrl, metaName, logScan, scanLog);
+                // Read the .meta sidecar if it's local, and request its
+                // download otherwise. A missing or cloud-only .meta is not
+                // junk under cloud sync — it may be syncing, evicted, or a
+                // stale orphan. Surface honestly via metaDownloadState rather
+                // than blocking on hydration. With nothing at the .meta's real
+                // path it's Missing, since it might be an orphan left by an
+                // interrupted delete. Its download is still requested, in case
+                // iCloud holds it under another name.
+                const QString metaProbe = resolveMeta(dir, entry,
+                                                      QtCloudBackup::DownloadState::Missing,
+                                                      info, logScan, scanLog);
 
                 // Fallback: parse filename (always needed when .meta is
                 // missing, and a safety net when .meta is malformed)
@@ -712,11 +687,9 @@ void AppleICloudBackend::scanBackups(quint64 requestId)
                     parseBackupFilename(entry, info.sourceId, info.timestamp);
 
                 if (logScan) {
-                    scanLog << QStringLiteral(
-                                   "backup: %1 via=QDir download=%2 meta=%3 metaProbe=%4 metaProbeError=%5")
+                    scanLog << QStringLiteral("backup: %1 via=QDir download=%2 meta=%3 metaProbe=%4")
                                    .arg(entry, describeState(info.downloadState),
-                                        describeState(info.metaDownloadState),
-                                        describeStatus(metaStatus), describeError(metaProbeError));
+                                        describeState(info.metaDownloadState), metaProbe);
                 }
 
                 backups.append(info);
