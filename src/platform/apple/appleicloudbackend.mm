@@ -446,15 +446,25 @@ void AppleICloudBackend::readBackup(const QString &filename)
             // path, treat it as cloud-only: iCloud might hold it as a
             // placeholder under another name.
             NSString *downloadStatus = nil;
+            NSError *probeError = nil;
             [bakUrl getResourceValue:&downloadStatus
                               forKey:NSURLUbiquitousItemDownloadingStatusKey
-                               error:nil];
-            if (!QFileInfo::exists(bakPath)
+                               error:&probeError];
+            const bool bakExists = QFileInfo::exists(bakPath);
+            if (!bakExists
                 || [downloadStatus isEqual:NSURLUbiquitousItemDownloadingStatusNotDownloaded]) {
                 // Trigger download and report — caller should wait for downloadReady
                 NSError *dlError = nil;
-                [[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:bakUrl
-                                                                             error:&dlError];
+                const BOOL requested = [[NSFileManager defaultManager]
+                    startDownloadingUbiquitousItemAtURL:bakUrl
+                                                  error:&dlError];
+                qCDebug(appleLog).noquote()
+                    << QStringLiteral("read: %1 file=%2 status=%3 error=%4 -> "
+                                      "requested download ok=%5 error=%6")
+                           .arg(filename, bakExists ? QStringLiteral("yes") : QStringLiteral("no"),
+                                describeStatus(downloadStatus), describeError(probeError),
+                                requested ? QStringLiteral("yes") : QStringLiteral("no"),
+                                describeError(dlError));
                 if (dlError) {
                     QMetaObject::invokeMethod(qApp, [self, filename,
                             msg = AppleICloudBackend::tr("Failed to start download: %1")
@@ -474,6 +484,10 @@ void AppleICloudBackend::readBackup(const QString &filename)
                 }
                 return;
             }
+
+            qCDebug(appleLog).noquote()
+                << QStringLiteral("read: %1 file=yes status=%2 error=%3 -> reading")
+                       .arg(filename, describeStatus(downloadStatus), describeError(probeError));
 
             // Coordinated read
             NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
@@ -870,6 +884,9 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
             NSError *error = nil;
             if (![[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:fileUrl
                                                                                error:&error]) {
+                qCDebug(appleLog).noquote()
+                    << QStringLiteral("download: %1 request failed: %2")
+                           .arg(filename, describeError(error));
                 QString msg = error
                     ? AppleICloudBackend::tr("Failed to start download: %1")
                           .arg(QString::fromNSString(error.localizedDescription))
@@ -886,7 +903,11 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
             // NSURL caches resource values, so we must create a fresh URL
             // each iteration to get updated status.
             bool downloaded = false;
+            int polls = 0;
+            QString endReason = QStringLiteral("timed out");
             for (int attempt = 0; attempt < 600; ++attempt) { // Up to ~60 seconds
+                polls = attempt + 1;
+
                 // Create fresh NSURL to avoid cached resource values
                 NSURL *freshUrl = [NSURL fileURLWithPath:fullPath.toNSString()];
 
@@ -903,6 +924,8 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
                      [downloadStatus isEqual:NSURLUbiquitousItemDownloadingStatusCurrent])
                     && QFileInfo::exists(fullPath)) {
                     downloaded = true;
+                    endReason = QStringLiteral("file present, status=%1")
+                                    .arg(describeStatus(downloadStatus));
                     break;
                 }
 
@@ -911,6 +934,7 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
                     // Verify the file is actually readable
                     if ([[NSFileManager defaultManager] isReadableFileAtPath:freshUrl.path]) {
                         downloaded = true;
+                        endReason = QStringLiteral("status=Downloaded, file readable");
                         break;
                     }
                 }
@@ -946,6 +970,10 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
 
                 [NSThread sleepForTimeInterval:0.1];
             }
+
+            qCDebug(appleLog).noquote()
+                << QStringLiteral("download: %1 ended after %2 polls: %3")
+                       .arg(filename, QString::number(polls), endReason);
 
             if (downloaded) {
                 QMetaObject::invokeMethod(qApp, [self, filename] {

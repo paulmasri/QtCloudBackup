@@ -729,7 +729,7 @@ The practical UX consequence: on Apple, `listBackups()` returns quickly, and a r
 
 No signal promises to tell the consumer that a `.meta` has finished downloading. So a consumer that shows metadata should call `listBackups()` again while any backup's `metaDownloadState` is `CloudOnly` or `Downloading`, for example every second, and stop once none is. Leave `Missing` and `Error` out of that rule: a `.meta` that's truly absent or unreadable stays that way, so polling on it would never stop. Windows never reports `CloudOnly` or `Downloading`, so there the first list ends the polling.
 
-To find out why a `.meta` stays `!= Local` on Apple, enable debug output for the `qtcloudbackup.apple` logging category. Each scan then logs every file in the backup folder with its iCloud download status, each backup's `downloadState` and `metaDownloadState`, and each download request with its result. A scan logs only when its lines differ from the last scan logged, so an app that rescans often doesn't repeat the same lines.
+To find out why a `.meta` stays `!= Local` on Apple, enable debug output for the `qtcloudbackup.apple` logging category. Each scan then logs every file in the backup folder with its iCloud download status, each backup's `downloadState` and `metaDownloadState`, and each download request with its result. A scan logs only when its lines differ from the last scan logged, so an app that rescans often doesn't repeat the same lines. The category also logs each `readBackup()` and each download: whether the `.bak` was at its real path, its download status, and whether the library read it or requested its download.
 
 Retention treats `metaDownloadState != Local` as **present but unconfirmed**:
 
