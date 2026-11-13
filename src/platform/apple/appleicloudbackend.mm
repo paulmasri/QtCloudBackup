@@ -442,12 +442,15 @@ void AppleICloudBackend::readBackup(const QString &filename)
 
             NSURL *bakUrl = [NSURL fileURLWithPath:bakPath.toNSString()];
 
-            // Check if file needs downloading first
+            // Check if file needs downloading first. With nothing at the real
+            // path, treat it as cloud-only: iCloud might hold it as a
+            // placeholder under another name.
             NSString *downloadStatus = nil;
             [bakUrl getResourceValue:&downloadStatus
                               forKey:NSURLUbiquitousItemDownloadingStatusKey
                                error:nil];
-            if ([downloadStatus isEqual:NSURLUbiquitousItemDownloadingStatusNotDownloaded]) {
+            if (!QFileInfo::exists(bakPath)
+                || [downloadStatus isEqual:NSURLUbiquitousItemDownloadingStatusNotDownloaded]) {
                 // Trigger download and report — caller should wait for downloadReady
                 NSError *dlError = nil;
                 [[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:bakUrl
