@@ -198,7 +198,7 @@ Other Group Policy values (`DisableFileSync` legacy, `DisableNewAccountDetection
 | `backupsListFailed(error, message)` | `listBackups()` failed: the backup directory could not be read, or no account is selected (see BackupError enum) |
 | `backupDigestsListed(digests)` | Lightweight scan complete; `digests` is a `QList<BackupDigest>` (filename-derived `sourceId`/`timestamp`/`filename` only). |
 | `backupReadStarted(filename)` | `readBackup()` accepted; bytes have not yet arrived |
-| `backupReadCompleted(filename, data, metadata)` | Read succeeded; `data` is the backup payload, `metadata` is the recorded metadata map |
+| `backupReadCompleted(filename, data, metadata)` | Read succeeded; `data` is the backup payload, `metadata` is the map from the `.meta`, read best effort. It's empty if the `.meta` wasn't there or wasn't local. For reliable metadata, use `BackupInfo.metadata` when `metaDownloadState == Local`; see [How the `.bak` and `.meta` files work together](#how-the-bak-and-meta-files-work-together). |
 | `backupReadFailed(filename, error, message)` | Read failed (see BackupError enum). For `InvalidArgument` and `BackupIoBusy` it is emitted synchronously, from inside `readBackup()`, with no `backupReadStarted` before it. |
 | `downloadUpdated(filename, status, error, message)` | Download status update (see DownloadStatus, BackupError enums) |
 | `downloadProgressChanged(filename, bytesReceived, bytesTotal)` | Download progress (`bytesTotal == -1` means indeterminate). Also fires during `readBackup()`'s auto-download retry. |
@@ -729,7 +729,7 @@ The practical UX consequence: on Apple, `listBackups()` returns quickly, and a r
 
 No signal promises to tell the consumer that a `.meta` has finished downloading. So a consumer that shows metadata should call `listBackups()` again while any backup's `metaDownloadState` is `CloudOnly` or `Downloading`, for example every second, and stop once none is. Leave `Missing` and `Error` out of that rule: a `.meta` that's truly absent or unreadable stays that way, so polling on it would never stop. Windows never reports `CloudOnly` or `Downloading`, so there the first list ends the polling.
 
-To find out why a `.meta` stays `!= Local` on Apple, enable debug output for the `qtcloudbackup.apple` logging category. Each scan then logs every file in the backup folder with its iCloud download status, each backup's `downloadState` and `metaDownloadState`, and each download request with its result. A scan logs only when its lines differ from the last scan logged, so an app that rescans often doesn't repeat the same lines.
+To find out why a `.meta` stays `!= Local` on Apple, enable debug output for the `qtcloudbackup.apple` logging category. Each scan then logs every file in the backup folder with its iCloud download status, each backup's `downloadState` and `metaDownloadState`, and each download request with its result. A scan logs only when its lines differ from the last scan logged, so an app that rescans often doesn't repeat the same lines. The category also logs each `readBackup()` and each download: whether the `.bak` was at its real path, its download status, and whether the library read it or requested its download.
 
 Retention treats `metaDownloadState != Local` as **present but unconfirmed**:
 
@@ -737,7 +737,7 @@ Retention treats `metaDownloadState != Local` as **present but unconfirmed**:
 - **Counted toward bucket occupancy.** A day with only a metadata-pending backup still counts as "this day has backups" for the purpose of N.
 - **Counted toward the minimum-keep safety net.** Real files representing real backup data; their existence prevents retention from concluding "we have no backups".
 
-Consumers that need an atomic single-unit backup can embed any application metadata directly in the `.bak` payload — the library's `.meta` sidecar is reserved for library bookkeeping and is best-effort under cloud sync.
+Data that must always arrive with the backup belongs in the `.bak` payload; see [How the `.bak` and `.meta` files work together](#how-the-bak-and-meta-files-work-together).
 
 ### Minimum-keep safety invariant
 
@@ -745,12 +745,33 @@ If the policy would prune every backup for the active `sourceId`, the latest one
 
 If there are any `metaDownloadState != Local` entries (mid-sync, evicted, cloud-only), the safety net is already satisfied — those entries are never pruned and represent real backup data, so no force-keep of confirmed entries is needed.
 
-## File-level atomicity
+## How the `.bak` and `.meta` files work together
 
-The library maintains a **writer-local invariant**: at the moment a write or delete returns, the writer's local filesystem holds either both files or neither.
+Each backup is two files with the same stem:
 
-- **Writes** are `.bak` first, then `.meta`. If the `.meta` write fails after the `.bak` succeeded, the `.bak` is rolled back. All three backends behave the same way.
-- **Deletes** are `.meta` first, then `.bak`. If the delete is interrupted between the two removals, what remains is an orphan `.bak` — surfaced by the scanner with `metaDownloadState = Missing` rather than left invisible.
+- **`.bak`** holds the payload. It is the backup: listing, reading and downloading all start from the `.bak`. Its filename also encodes the `sourceId` and the timestamp, so a `.bak` on its own still says which source wrote it and when.
+- **`.meta`** is a small JSON file beside it, holding the `sourceId`, the timestamp and the application metadata map. On the writer's device, it also marks a finished write.
+
+What each operation does with the two files:
+
+- **`createBackup()`** writes the `.bak`, then the `.meta`. If the `.meta` write fails, it removes the `.bak`. So on the writer's device, a `.meta` always means a complete backup.
+- **`deleteBackup()`, and each delete in a prune,** removes the `.meta`, then the `.bak`. If a delete is interrupted between the two, the `.bak` is left behind, and the scanner lists it with `metaDownloadState = Missing`. The other order would leave a `.meta` that nothing lists.
+- **`listBackups()`** returns one row per `.bak`. On Apple it also includes backups that iCloud knows about but the folder listing doesn't find. The `.meta` decides `metaDownloadState` and, when it's `Local`, supplies `metadata`, `sourceId` and `timestamp`. Otherwise `metadata` is empty, and `sourceId` and `timestamp` come from the filename. On Apple the scanner requests the download of any `.meta` that isn't local; on Windows it opens every `.meta`. See [the cloud-sync caveat](#cloud-sync-caveat--metadownloadstate).
+- **`listBackupDigests()`** reads only `.bak` filenames, and never opens a `.meta`.
+- **A prune** scans first, as `listBackups()` does. It deletes only backups whose `metaDownloadState` is `Local`. A backup in any other state is kept, but counts toward bucket occupancy and the minimum-keep rule. See [How pruning works](#how-pruning-works).
+- **`readBackup()`** reads the `.bak`, downloading it first if it's cloud-only, then reads the `.meta` best effort. If the `.meta` isn't there or isn't local, `backupReadCompleted` carries an empty `metadata` map, and the read still succeeds.
+- **`requestDownload()`** downloads the `.bak` only.
+- **Orphan migration** copies each `.bak`, then its `.meta` if there is one. Then it removes the original `.meta`, then the original `.bak`, in the same order as `deleteBackup()`.
+
+What this means for a consumer:
+
+- **Cloud sync copies each file separately.** Another device might see a `.bak` without its `.meta`, or with the `.meta` still downloading. The write order guarantees nothing beyond the writer's own device.
+- **The reliable copy of the metadata** is `BackupInfo.metadata` from `listBackups()`, when `metaDownloadState == Local`. A consumer that needs the metadata alongside a read should wait for `Local` before reading, or use the list's copy.
+- **Data that must always arrive with the backup belongs in the `.bak` payload.** The library reserves the `.meta` for its own bookkeeping, and the `.meta` is best-effort under cloud sync.
+
+### File-level atomicity
+
+The library maintains a **writer-local invariant**: at the moment a write or delete returns, the writer's local filesystem holds either both files or neither. The write and delete orders above keep it, and all three backends behave the same way.
 
 This invariant holds **only** at the writer's local filesystem at write/delete time. Cross-device consistency under cloud sync is not guaranteed in real time — see [the cloud-sync caveat](#cloud-sync-caveat--metadownloadstate).
 
