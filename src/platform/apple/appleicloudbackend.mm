@@ -1085,9 +1085,12 @@ void AppleICloudBackend::migrateOrphanedBackups(const QList<OrphanedBackupInfo> 
                     coordinatedWrite(destMeta, metaData);
                 }
 
-                // Delete originals
+                // Delete originals, .meta first as deleteBackup() does, so an
+                // interruption leaves a .bak that the scanner lists rather
+                // than an orphan .meta that nothing lists.
+                if (!QFile::remove(srcMeta) && QFile::exists(srcMeta))
+                    qWarning("Failed to remove metadata sidecar: %s", qPrintable(srcMeta));
                 QFile::remove(srcBak);
-                QFile::remove(srcMeta);
 
                 ++migrated;
                 QMetaObject::invokeMethod(qApp, [self, migrated, total] {
