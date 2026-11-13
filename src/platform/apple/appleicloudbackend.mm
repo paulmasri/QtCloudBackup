@@ -895,10 +895,13 @@ void AppleICloudBackend::triggerDownload(const QString &filename)
                                     forKey:NSURLUbiquitousItemDownloadingStatusKey
                                      error:nil];
 
-                // nil status means the file is not ubiquitous (local-only) or
-                // already fully materialized — either way, it's available
-                if (!downloadStatus ||
-                    [downloadStatus isEqual:NSURLUbiquitousItemDownloadingStatusCurrent]) {
+                // With a file at the real path, a nil status means the file
+                // is not ubiquitous (local-only) or already fully
+                // materialized — either way, it's available. With nothing
+                // there, it might still be a placeholder, so keep polling.
+                if ((!downloadStatus ||
+                     [downloadStatus isEqual:NSURLUbiquitousItemDownloadingStatusCurrent])
+                    && QFileInfo::exists(fullPath)) {
                     downloaded = true;
                     break;
                 }
